@@ -1,4 +1,4 @@
-# Sub-Microsecond Binary Neural Network Inference Core for High-Frequency Trading
+# Ultra-Low-Latency ML inference on constrained FPGA.
 
 ## Overview
 This repository contains the complete software, firmware, and RTL implementation of a hardware-accelerated Binary Neural Network (BNN) engineered for high-frequency trading (HFT). Designed to target resource-constrained silicon (the Renesas SLG47910V FPGA) paired with an ESP32-S3 microcontroller, the system pushes machine learning inference latency to the absolute theoretical limit of the fabric.
