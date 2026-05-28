@@ -1,0 +1,20 @@
+menu "BNN Trading Firmware"
+
+config BNN_WIFI_SSID
+    string "WiFi SSID"
+    default "YOUR_WIFI_SSID"
+
+config BNN_WIFI_PASSWORD
+    string "WiFi password"
+    default "YOUR_WIFI_PASSWORD"
+
+config BNN_WIFI_MAX_RETRY
+    int "WiFi connection retry count"
+    default 8
+    range 1 64
+
+config BNN_BINANCE_URI
+    string "Binance WebSocket URI"
+    default "wss://stream.binance.com:9443/ws/btcusdt@bookTicker"
+
+endmenu
