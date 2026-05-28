@@ -1,0 +1,10 @@
+{"timestamp":1779968904.66293,"spike_vector":"0x0000","decision":0,"latency_ns":220,"status":"SUCCESS","log_timestamp":1779968904.6629472}
+{"timestamp":1779968904.663083,"spike_vector":"0x0001","decision":1,"latency_ns":221,"status":"SUCCESS","log_timestamp":1779968904.663092}
+{"timestamp":1779968904.663129,"spike_vector":"0x0002","decision":2,"latency_ns":222,"status":"SUCCESS","log_timestamp":1779968904.663137}
+{"timestamp":1779968904.663166,"spike_vector":"0x0003","decision":0,"latency_ns":223,"status":"SUCCESS","log_timestamp":1779968904.6631732}
+{"timestamp":1779968904.663198,"spike_vector":"0x0004","decision":1,"latency_ns":224,"status":"SUCCESS","log_timestamp":1779968904.6632051}
+{"timestamp":1779968904.663229,"spike_vector":"0x0005","decision":2,"latency_ns":225,"status":"SUCCESS","log_timestamp":1779968904.6632361}
+{"timestamp":1779968904.66326,"spike_vector":"0x0006","decision":0,"latency_ns":226,"status":"SUCCESS","log_timestamp":1779968904.663266}
+{"timestamp":1779968904.66329,"spike_vector":"0x0007","decision":1,"latency_ns":227,"status":"SUCCESS","log_timestamp":1779968904.663297}
+{"timestamp":1779968904.66332,"spike_vector":"0x0008","decision":2,"latency_ns":228,"status":"SUCCESS","log_timestamp":1779968904.663326}
+{"timestamp":1779968904.663349,"spike_vector":"0x0009","decision":0,"latency_ns":229,"status":"SUCCESS","log_timestamp":1779968904.6633549}
