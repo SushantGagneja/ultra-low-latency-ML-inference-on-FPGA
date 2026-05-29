@@ -14,7 +14,7 @@ This implementation has been physically deployed, validated on silicon, and prov
 ├── constraints/         # SDC timing and PCF pinmap constraints for synthesis
 ├── esp32_firmware/      # C firmware for live Binance WS ingestion & quantization
 ├── fpga_weights/        # Extracted binary weights in .mem and .h formats
-├── monitoring/          # Python daemon for institutional SLA audit logging
+├── monitoring/          # Python daemon for performance audit logging
 ├── rtl/                 # Verilog source for the BNN core and SPI slave
 │   └── testbench/       # Icarus Verilog testbenches for RTL validation
 ├── scripts/             # Python tools for test vector generation and co-simulation
@@ -42,7 +42,7 @@ The `bnn_core.v` module executes the inference completely independently of the E
 *   **XNOR-Popcount Logic:** Floating-point Multiply-Accumulate (MAC) operations are entirely replaced by binary XNOR and popcount adder trees.
 *   **Zero Batch Normalization:** Traditional BNNs rely heavily on BatchNorm to recenter distributions after binarization. In this architecture, BatchNorm is completely omitted because the output layer is a strict threshold-based classifier, making continuous distribution recentering redundant. This saves hundreds of LUTs and precious cycle latency.
 *   **O(1) Inference:** The network always consumes exactly 23 clock cycles. There is no data-dependent latency.
-*   **100 MHz Timing Closure:** Synthesis and Place & Route on the Renesas SLG47910V (GreenPAK) achieves a maximum routed frequency (Fmax) of 112.48 MHz. The critical path (BRAM -> XNOR -> 4-stage Adder Tree -> DFF) closes timing with a Setup WNS of 1.110 ns at the target 100 MHz clock.
+*   **100 MHz Timing Closure:** Synthesis and Place & Route on the Renesas SLG47910V (ForgeFPGA) achieves a maximum routed frequency (Fmax) of 112.48 MHz. The critical path (BRAM -> XNOR -> 4-stage Adder Tree -> DFF) closes timing with a Setup WNS of 1.110 ns at the target 100 MHz clock.
 
 ### RTL Microarchitecture
 The FPGA core avoids DSP slices entirely. The 16-input, 64-hidden, 3-output topology is computed using spatial folding and time-multiplexing to minimize logic element (LE) utilization while strictly meeting the sub-300ns latency SLA.
@@ -55,7 +55,7 @@ In a BNN, weights and activations are strictly binary. The traditional arithmeti
 ![XNOR-Popcount ALU Logic](media/xnor_logic.png)
 
 #### FPGA Physical Tape-Down & Floorplan
-The following diagram illustrates how the logical architecture maps to the physical SLG47910V GreenPAK fabric and I/O ring. The architecture is severely I/O bound, dedicating 4 pins to the SPI bus, 1 for the System Clock, and 1 for the asynchronous Interrupt.
+The following diagram illustrates how the logical architecture maps to the physical SLG47910V ForgeFPGA fabric and I/O ring. The architecture is severely I/O bound, dedicating 4 pins to the SPI bus, 1 for the System Clock, and 1 for the asynchronous Interrupt.
 
 ![SLG47910V Physical Floorplan](media/floorplan.png)
 
@@ -123,23 +123,23 @@ The ground-truth labels for the training set are generated deterministically bas
 Because the labels are derived from the input features, this creates a circular evaluation loop. The 82.94% accuracy does not mean the model predicts the future—it means **the BNN successfully compresses and approximates a deterministic rule-based classifier entirely in hardware-accelerated binary arithmetic.** The BNN acts as a highly efficient, 230ns hardware-compressed rule engine.
 
 ### Out-of-Sample Confusion Matrix
-The following confusion matrix is evaluated on 1,800 out-of-sample ticks. **Note:** These are *synthetic* ticks generated from a distribution matching real Binance `bookTicker` data (using LogNormal volume calibration), not a replay of real historical market data. This evaluation proves the hardware mapping's fidelity to the software model's decision boundaries, rather than out-of-sample historical market profitability.
+The following confusion matrix is evaluated on 1,800 out-of-sample ticks. **Note:** These are *synthetic* ticks generated from a distribution matching real Binance `bookTicker` data (using LogNormal volume calibration). The data generation utilizes a sinusoidal drift over the stochastic walk to guarantee periodic indicator crossings. While sufficient as a generative proxy to prove the hardware logic compression, it does not capture true microstructural fat tails or bid-ask bounce. This evaluation proves the hardware mapping's fidelity to the software model's decision boundaries, rather than out-of-sample historical market profitability.
 
 ![Hardware Core Confusion Matrix](media/bnn_true_confusion_matrix.png)
 
-**Analysis:** While the recall is highly sensitive (~90% detection rate for actionable spikes), the precision reveals the cost of extreme parameter quantization. The HOLD class generates 232 false BUY predictions (an 18.8% false positive rate on the majority class), dragging BUY precision down to 40.4%. In a live trading scenario, this precision would result in losing trades without an additional classical filtering layer. The SELL signal is significantly more robust at 81.2% precision.
+**Analysis:** While the recall is highly sensitive (~90% detection rate for actionable spikes), the precision reveals the cost of extreme parameter quantization. The HOLD class generates 232 false BUY predictions (an 18.8% false positive rate on the majority class) but only 39 false SELL predictions. This severe asymmetry exists because BUY's binary representation in XNOR space sits geometrically closer to HOLD than SELL does. This is partly an artifact of the bipolar quantizer mapping both highly oversold (RSI=20) and neutral (RSI=50) zones to `-1` for the first bit, relying heavily on subsequent momentum bits to establish linear separability. While this overlap drags BUY precision down to 40.4%, the SELL signal remains highly separable and robust at 81.2% precision. Furthermore, 100% co-simulation accuracy confirms that the Verilog FSM's weight addressing perfectly matches the Python extraction scheme.
 
 ## Verification and Validation Methodology
 
-A critical requirement of this project was absolute assurance of mathematical equivalence and hardware robustness before deploying capital.
+A critical requirement of this project was absolute assurance of mathematical equivalence and hardware robustness before physical validation.
 
 1.  **C/Python Feature Equivalence:** The ESP32 `temporal_features.c` and `quantization.c` are compiled locally and streamed with 100,000 realistic market ticks against the Python `retrain_bookticker.py` extractor. We assert that float drift between x86 and Xtensa FPUs is within `1e-4` (machine epsilon), and that the resulting 16-bit binary quantized spike is **100% bit-exact identical** between Python and C.
-2.  **Formal Verification (SymbiYosys SVA):** The `bnn_core` state machine is mathematically proven using SystemVerilog Assertions (SVA) and the `yices` SMT solver. The proofs guarantee bounded execution (no deadlocks), strict 23-cycle completion, and absolute metastability avoidance.
+2.  **Formal Verification (SymbiYosys SVA):** The `bnn_core` state machine is formally verified using SystemVerilog Assertions (SVA) via SymbiYosys (see `formal.sby`). The proofs guarantee bounded execution (no deadlocks), strict 23-cycle completion, and correct boolean logic implementation of the CDC protocol.
 3.  **Adversarial RTL Testbench:** The Icarus Verilog testbench injects hardware faults, asserting that the FSM does not lock up when `CS_n` deasserts mid-transfer, when the SPI clock stops unexpectedly mid-byte, or when spurious `start` strobes fire.
 4.  **Hardware-Accurate Python Simulation:** A standalone XNOR-popcount simulator in Python verifies that replacing floating-point math with binary logic yields identical classification boundaries.
 5.  **End-to-End Co-Simulation:** A Python test harness (`cosim.py`) drives Icarus Verilog (`vvp`) via subprocesses. It streams 500 market ticks through the software quantizer, injects the vectors into the Verilog simulation, reads the RTL output, and asserts a 100% bit-exact match with the golden model.
 
-## Institutional Infrastructure
+## System Infrastructure
 
 *   **Historical Backtest Engine (`scripts/historical_backtest.py`):** Uses real Binance `bookTicker` archives to execute an out-of-sample backtest. Incorporates a realistic transaction cost model (4 bps taker fee + 1 bps slippage) and models real microstructure constraints (bid-ask bounce, volatility clustering).
 *   **Live PnL Monitor (`monitoring/bnn_trading_monitor.py`):** Acts as a real-time audit daemon. It parses the UART telemetry from the ESP32, simulates a live mark-to-market equity curve, and enforces a hard position limit of 1 contract.
@@ -180,8 +180,8 @@ idf.py build flash monitor
 ### Synthesis
 The RTL directory is agnostic to the synthesis tool. For Renesas Go Configure Software Hub, import `rtl/*.v`, apply the constraints found in `constraints/bnn_top.sdc`, and map the physical pins using `constraints/pinmap.pcf`.
 
-## Institutional Compliance Audit Logging
-The system includes an institutional-grade compliance monitor (`monitoring/bnn_trading_monitor.py`). It consumes the ESP32 serial feed to generate an immutable JSONL audit trail of every inference, verifying that latency SLAs are met continuously in production environments.
+## Monitoring and Audit Logging
+The system includes a performance monitor (`monitoring/bnn_trading_monitor.py`). It consumes the ESP32 serial feed to generate an immutable JSONL audit trail of every inference, verifying that latency SLAs are met continuously in production environments.
 
 ## License
 MIT License. See LICENSE file for details.
