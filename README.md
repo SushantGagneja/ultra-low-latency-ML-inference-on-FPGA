@@ -18,7 +18,7 @@ This implementation has been physically deployed, validated on silicon, and prov
 ├── rtl/                 # Verilog source for the BNN core and SPI slave
 │   └── testbench/       # Icarus Verilog testbenches for RTL validation
 ├── scripts/             # Python tools for test vector generation and co-simulation
-└── train bnn standalone.py # Larq/TensorFlow BNN training pipeline
+└── train_bnn_standalone.py # Larq/TensorFlow BNN training pipeline
 ```
 
 ## System Architecture
