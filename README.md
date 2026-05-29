@@ -60,9 +60,10 @@ flowchart TD
 
 ## Hardware/Software Co-Design Strategy
 
-### ESP32-S3 Market Ingestion and Quantization
+### ESP32-S3 Market Ingestion and Concurrency
 The firmware is engineered to operate in the hot path with strict deterministic bounds. It connects directly to the Binance `bookTicker` stream over TLS.
 
+*   **Zero-Copy SPI DMA Concurrency:** To achieve true pipeline concurrency, the firmware is split into two FreeRTOS tasks. The Ingestion Task quantizes the tick and fires an asynchronous, non-blocking DMA SPI transaction (`spi_device_queue_trans`). The Xtensa core immediately begins processing the *next* tick while the FPGA computes the current tick. A hardware interrupt on the `DONE` pin wakes the Result Task to harvest the decision, completely decoupling CPU execution from inference latency.
 *   **O(1) Feature Extraction:** To prevent latency spikes associated with garbage collection or heap fragmentation, the market state is maintained using pre-allocated ring buffers. Features (RSI, Momentum, Volatility) are updated in O(1) algorithmic time upon receiving a new tick.
 *   **LogNormal Volume Calibration:** Volume metrics are calibrated against the top-of-book liquidity distribution (bid quantity + ask quantity) modeled as a LogNormal distribution. This captures heavy-tailed market events accurately.
 *   **Bipolar Quantization:** Floating-point indicators are passed through a static quantization matrix. Thresholds are calibrated during the Python training phase and hardcoded into the C firmware. The output is a deterministic 16-bit "spike vector".
@@ -163,11 +164,12 @@ The following confusion matrix is evaluated on 1,800 out-of-sample ticks. **Note
 
 ## Verification and Validation Methodology
 
-A critical requirement of this project was mathematical equivalence between the high-level Python model and the Verilog implementation.
+A critical requirement of this project was absolute assurance of mathematical equivalence and hardware robustness before deploying capital.
 
-1.  **Model Training:** The network is trained using TensorFlow and Larq. The weights are extracted and formatted into a `.mem` file for Verilog `$readmemb` and a `.h` file for the ESP32.
-2.  **Hardware-Accurate Python Simulation:** A standalone XNOR-popcount simulator in Python verifies that replacing floating-point math with binary logic yields identical classification boundaries.
-3.  **End-to-End Co-Simulation:** A Python test harness (`cosim.py`) drives Icarus Verilog (`vvp`) via subprocesses. It streams 500 market ticks through the software quantizer, injects the vectors into the Verilog simulation, reads the RTL output, and asserts a 100% bit-exact match with the golden model.
+1.  **Formal Verification (SymbiYosys SVA):** The `bnn_core` state machine is mathematically proven using SystemVerilog Assertions (SVA) and the `yices` SMT solver. The proofs guarantee bounded execution (no deadlocks), strict 23-cycle completion, and absolute metastability avoidance.
+2.  **Model Training:** The network is trained using TensorFlow and Larq. The weights are extracted and formatted into a `.mem` file for Verilog `$readmemb` and a `.h` file for the ESP32.
+3.  **Hardware-Accurate Python Simulation:** A standalone XNOR-popcount simulator in Python verifies that replacing floating-point math with binary logic yields identical classification boundaries.
+4.  **End-to-End Co-Simulation:** A Python test harness (`cosim.py`) drives Icarus Verilog (`vvp`) via subprocesses. It streams 500 market ticks through the software quantizer, injects the vectors into the Verilog simulation, reads the RTL output, and asserts a 100% bit-exact match with the golden model.
 
 ## Usage and Compilation
 
@@ -175,6 +177,12 @@ A critical requirement of this project was mathematical equivalence between the 
 *   Python 3.10+ with TensorFlow 2.x and Larq
 *   Icarus Verilog (`iverilog`) and GTKWave for RTL simulation
 *   ESP-IDF v5.0+ for ESP32 compilation
+
+### Formal Verification
+To mathematically prove the RTL does not deadlock and bounds its execution to 23 cycles:
+```bash
+sby formal.sby
+```
 
 ### Hardware Co-Simulation
 To execute the mathematical proof of equivalence between the trained model and the RTL:
@@ -204,3 +212,4 @@ The system includes an institutional-grade compliance monitor (`monitoring/bnn_t
 
 ## License
 MIT License. See LICENSE file for details.
+
