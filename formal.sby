@@ -1,0 +1,15 @@
+[options]
+mode bmc
+depth 30
+expect pass
+
+[engines]
+smtbmc yices
+
+[script]
+read -formal bnn_core.v xnor_popcount.v
+prep -top bnn_core
+
+[files]
+rtl/bnn_core.v
+rtl/xnor_popcount.v
