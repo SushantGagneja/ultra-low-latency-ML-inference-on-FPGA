@@ -26,36 +26,38 @@ This implementation has been physically deployed, validated on silicon, and prov
 The trading pipeline is distributed across three tightly-coupled domains: Model Training (Python), Market Ingestion (C/ESP32), and Inference Acceleration (Verilog/FPGA).
 
 ```mermaid
-flowchart TD
-    subgraph External
-        BWS[Binance WebSocket\nbtcusdt@bookTicker]
+flowchart LR
+    subgraph External ["External Data"]
+        BWS("Binance WS<br>btcusdt@bookTicker")
     end
 
-    subgraph ESP32-S3 Firmware
-        ING[Ingestion Task\nNo Heap Allocations]
-        FEAT[O_1 Feature Extractor\nRSI, Momentum, Volatility]
-        QUANT[Bipolar Quantizer\nFloat to 16-bit Spike]
-        SPIM[SPI Master\nSplit-Transaction]
+    subgraph ESP32 ["ESP32-S3 Firmware (C/FreeRTOS)"]
+        direction TB
+        ING["Ingestion Task<br>(Zero Heap Allocations)"]
+        FEAT["O(1) Feature Extractor<br>(RSI, Momentum, Volatility)"]
+        QUANT["Bipolar Quantizer<br>(Float to 16-bit Spike)"]
+        SPIM["SPI Master<br>(DMA Split-Transaction)"]
+        
+        ING --> FEAT --> QUANT --> SPIM
     end
 
-    subgraph FPGA SLG47910V
-        SPIS[SPI Slave CDC\nToggle Synchronizer]
-        FSM[Time-Multiplexed FSM\n23 Cycle Latency]
-        BRAM[(Dual-Port BRAM\n1.19 kbits)]
-        XNOR[4x16-bit XNOR\nPopcount Arrays]
-        OUT[Argmax Decision\nBUY/HOLD/SELL]
+    subgraph FPGA ["Renesas SLG47910V (GreenPAK)"]
+        direction TB
+        SPIS["SPI Slave CDC<br>(Toggle Synchronizer)"]
+        FSM["Time-Multiplexed FSM<br>(23 Cycle Latency)"]
+        BRAM[("Dual-Port BRAM<br>(1.19 kbits)")]
+        XNOR["4x16-bit XNOR<br>Popcount Arrays"]
+        OUT(("Argmax Decision<br>BUY / HOLD / SELL"))
+        
+        SPIS --> FSM
+        BRAM --- FSM
+        FSM <--> XNOR
+        FSM --> OUT
     end
 
-    BWS -->|Live JSON| ING
-    ING --> FEAT
-    FEAT --> QUANT
-    QUANT -->|16-bit Vector| SPIM
-    SPIM -->|80 MHz SPI| SPIS
-    SPIS -->|100 MHz Sys_Clk| FSM
-    BRAM --> FSM
-    FSM <--> XNOR
-    FSM --> OUT
-    OUT -->|Done Interrupt| SPIM
+    BWS == "Live JSON" ==> ING
+    SPIM == "80 MHz SPI<br>16-bit Vector" ==> SPIS
+    OUT -. "Hardware Interrupt<br>DONE Signal" .-> SPIM
 ```
 
 ### Hardware/Software Co-Design Strategy
@@ -85,15 +87,82 @@ In a BNN, weights and activations are strictly binary. The traditional arithmeti
 
 ```mermaid
 flowchart LR
-    X[Input Vector\n16 bits] --> XNOR{XNOR Array}
-    W[Weight Vector\n16 bits] --> XNOR
-    XNOR -->|16 bits| POP[Popcount Adder Tree]
-    POP -->|Integer 0-16| THRESH{Threshold >= 8?}
-    THRESH -->|1 bit| H[Hidden Activation]
+    X["Input Vector<br>(16 bits)"] --> XNOR{"XNOR<br>Array"}
+    W["Weight Vector<br>(16 bits)"] --> XNOR
+    XNOR -->|"16 bits"| POP["Popcount<br>Adder Tree"]
+    POP -->|"Integer 0-16"| THRESH{"Threshold<br>>= 8?"}
+    THRESH -->|"1 bit"| H["Hidden<br>Activation"]
+    
+    style XNOR fill:#1f618d,stroke:#2980b9,stroke-width:2px,color:#fff
+    style POP fill:#1f618d,stroke:#2980b9,stroke-width:2px,color:#fff
+    style THRESH fill:#b03a2e,stroke:#c0392b,stroke-width:2px,color:#fff
+```
+
+#### FPGA Physical Tape-Down & Floorplan
+The following diagram illustrates how the logical architecture maps to the physical SLG47910V GreenPAK fabric and I/O ring. The architecture is severely I/O bound, dedicating 4 pins to the SPI bus, 1 for the System Clock, and 1 for the asynchronous Interrupt.
+
+```mermaid
+block-beta
+  columns 5
+  
+  %% TOP I/O RING
+  space:1
+  PIN_CS["Pin 2: CS_n"]
+  PIN_MOSI["Pin 3: MOSI"]
+  PIN_SCLK["Pin 4: SCLK"]
+  space:1
+  
+  %% FABRIC ROW 1
+  PIN_CLK["Pin 1:<br>SYS_CLK<br>(100MHz)"]
+  block:CDC:3
+    SPI_SLAVE["SPI Slave Logic & CDC Toggle Synchronizer"]
+  end
+  PIN_MISO["Pin 5:<br>MISO"]
+  
+  %% FABRIC ROW 2
+  space:1
+  block:CORE:3
+    FSM["23-Cycle FSM Engine"]
+    XNOR_MAC["4x XNOR-Popcount ALUs"]
+  end
+  space:1
+  
+  %% FABRIC ROW 3
+  space:1
+  BRAM[("Embedded BRAM<br>(1.19 kbits)")]
+  space:1
+  ARGMAX["Winner-Take-All<br>Argmax"]
+  space:1
+  
+  %% BOTTOM I/O RING
+  space:3
+  PIN_DONE["Pin 14:<br>DONE Interrupt"]
+  space:1
+
+  %% Internal Routing Lines
+  PIN_CLK --> CORE
+  PIN_CS --> CDC
+  PIN_MOSI --> CDC
+  PIN_SCLK --> CDC
+  CDC --> PIN_MISO
+  CDC --> CORE
+  CORE --> BRAM
+  CORE --> ARGMAX
+  ARGMAX --> PIN_DONE
+
+  classDef io fill:#2c3e50,stroke:#34495e,color:#fff,stroke-width:2px;
+  classDef logic fill:#1f618d,stroke:#2980b9,color:#fff,stroke-width:2px;
+  classDef mem fill:#b03a2e,stroke:#c0392b,color:#fff,stroke-width:2px;
+  
+  class PIN_CS,PIN_MOSI,PIN_SCLK,PIN_CLK,PIN_MISO,PIN_DONE io;
+  class CDC,CORE,SPI_SLAVE,FSM,XNOR_MAC,ARGMAX logic;
+  class BRAM mem;
 ```
 
 #### Time-Multiplexed State Machine
 To process 64 hidden neurons without requiring 64 parallel popcount trees, the design utilizes 4 parallel execution units operating over a precisely scheduled 23-cycle window.
+
+![BNN Hardware Core 23-Cycle FSM Pipeline](media/GTKWaveform.png)
 
 | Cycle Range | Operation |
 |-------------|-----------|
@@ -117,7 +186,7 @@ The bitstream was synthesized and deployed to a Renesas SLG47910V targeting a 10
 | **Total Parameters** | 1,216 bits | 152 bytes for a 16x64x3 architecture |
 | **BRAM Utilization** | 1.19 kbits | 3.7% of a standard 32kbit block |
 | **DSP Utilization** | 0 blocks | Pure XNOR-popcount integer logic |
-| **Synthetic Out-of-Sample Accuracy**| 86.22% | Evaluated on synthetic ticks matching live Binance BTCUSDT distributions |
+| **Synthetic Out-of-Sample Accuracy**| 82.94% | Evaluated on synthetic ticks matching live Binance BTCUSDT distributions |
 
 ### Synthesis Report (RTL Resource Utilization)
 The complete elimination of hardware multipliers yields an exceptionally lean logic footprint. The following is the synthesis output confirming logic cell and register utilization:
@@ -151,21 +220,12 @@ The ground-truth labels for the training set are generated deterministically bas
 *   **SELL (Class 2):** `RSI > 70` AND `Momentum > 0.004` (Overbought with strong positive acceleration).
 *   **HOLD (Class 1):** All other conditions.
 
-Because the labels are derived from the input features, this creates a circular evaluation loop. The 86.22% accuracy does not mean the model predicts the future—it means **the BNN successfully compresses and approximates a deterministic rule-based classifier entirely in hardware-accelerated binary arithmetic.** The BNN acts as a highly efficient, 230ns hardware-compressed rule engine.
+Because the labels are derived from the input features, this creates a circular evaluation loop. The 82.94% accuracy does not mean the model predicts the future—it means **the BNN successfully compresses and approximates a deterministic rule-based classifier entirely in hardware-accelerated binary arithmetic.** The BNN acts as a highly efficient, 230ns hardware-compressed rule engine.
 
 ### Out-of-Sample Confusion Matrix
 The following confusion matrix is evaluated on 1,800 out-of-sample ticks. **Note:** These are *synthetic* ticks generated from a distribution matching real Binance `bookTicker` data (using LogNormal volume calibration), not a replay of real historical market data. This evaluation proves the hardware mapping's fidelity to the software model's decision boundaries, rather than out-of-sample historical market profitability.
 
-| | Predicted BUY | Predicted HOLD | Predicted SELL |
-|---|---|---|---|
-| **True BUY (172)** | **157** | 15 | 0 |
-| **True HOLD (1439)** | 232 | **1168** | 39 |
-| **True SELL (189)** | 0 | 21 | **168** |
-
-*   **Test Set Accuracy:** 86.22%
-*   **Class Balance:** BUY (9.5%), HOLD (80.0%), SELL (10.5%)
-*   **Recall:** BUY (91.2%), SELL (88.8%). 
-*   **Precision:** BUY (40.4%), SELL (81.2%). 
+![Hardware Core Confusion Matrix](media/bnn_true_confusion_matrix.png)
 
 **Analysis:** While the recall is highly sensitive (~90% detection rate for actionable spikes), the precision reveals the cost of extreme parameter quantization. The HOLD class generates 232 false BUY predictions (an 18.8% false positive rate on the majority class), dragging BUY precision down to 40.4%. In a live trading scenario, this precision would result in losing trades without an additional classical filtering layer. The SELL signal is significantly more robust at 81.2% precision.
 
