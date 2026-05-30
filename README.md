@@ -122,6 +122,11 @@ The ground-truth labels for the training set are generated deterministically bas
 
 Because the labels are derived from the input features, this creates a circular evaluation loop. The 82.94% accuracy does not mean the model predicts the future—it means **the BNN successfully compresses and approximates a deterministic rule-based classifier entirely in hardware-accelerated binary arithmetic.** The BNN acts as a highly efficient, 230ns hardware-compressed rule engine.
 
+### Model Training and Convergence
+To ensure the BNN successfully generalizes the rule-based logic without overfitting, the model is trained with strict early-stopping heuristics on a 15% validation split. 
+
+![Training Convergence](media/bnn_training_loss.png)
+
 ### Out-of-Sample Confusion Matrix
 The following confusion matrix is evaluated on 1,800 out-of-sample ticks. **Note:** These are *synthetic* ticks generated from a distribution matching real Binance `bookTicker` data (using LogNormal volume calibration). The data generation utilizes a sinusoidal drift over the stochastic walk to guarantee periodic indicator crossings. While sufficient as a generative proxy to prove the hardware logic compression, it does not capture true microstructural fat tails or bid-ask bounce. This evaluation proves the hardware mapping's fidelity to the software model's decision boundaries, rather than out-of-sample historical market profitability.
 
