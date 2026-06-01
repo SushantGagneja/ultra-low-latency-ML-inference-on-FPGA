@@ -1,3 +1,4 @@
+// Fixture weights — regenerate with train_bnn_standalone.py after retraining.
 // Layer 1: 64 neurons × 16 inputs = 1,024 bits
 // Address layout: [neuron_j * 16 + input_i]
 1
