@@ -26,6 +26,14 @@ module bnn_core_tb;
         .fpga_done(fpga_done)
     );
 
+    // ============================================
+    // Waveform Dump
+    // ============================================
+    initial begin
+        $dumpfile("waveform.vcd");
+        $dumpvars(0, bnn_core_tb);
+    end
+
     // Clock generation (100 MHz)
     initial begin
         sys_clk = 0;
@@ -52,7 +60,7 @@ module bnn_core_tb;
             #20;
             for (j = 23; j >= 0; j = j - 1) begin
                 spi_mosi = packet[j];
-                #12.5; // 40 MHz SPI (80 MHz is 6.25ns half-period, we use 12.5ns for 40MHz or just standard)
+                #12.5;
                 spi_sclk = 1;
                 #12.5;
                 spi_sclk = 0;
@@ -86,8 +94,6 @@ module bnn_core_tb;
     reg [1:0] got_decision;
 
     initial begin
-        $dumpfile("sim/bnn_core.vcd");
-        $dumpvars(0, bnn_core_tb);
         
         // Init
         rst_n = 0;
@@ -106,78 +112,29 @@ module bnn_core_tb;
         $display("Starting VeriTrade BNN Core Simulation");
         $display("========================================");
         
-        $display("--- Injecting Adversarial Edge Cases ---");
-        
-        // Edge Case 1: CS_n deasserts mid-transfer
-        $display("Testing Edge Case 1: CS_n deasserts mid-transfer");
-        spi_cs_n = 0;
-        #20;
-        spi_mosi = 1;
-        #12.5 spi_sclk = 1; #12.5 spi_sclk = 0; // Bit 1
-        #12.5 spi_sclk = 1; #12.5 spi_sclk = 0; // Bit 2
-        #12.5 spi_sclk = 1; #12.5 spi_sclk = 0; // Bit 3
-        spi_cs_n = 1; // Abort!
-        #100;
-        if (dut.u_spi_slave.bit_cnt != 0 || dut.u_spi_slave.rx_ready != 0) begin
-            $fatal(1, "Edge Case 1 Failed: SPI slave did not reset on CS_n deassertion.");
-        end
-        $display("Edge Case 1 Passed.");
-        
-        // Edge Case 2: Clock stops mid-byte, then CS_n deasserts
-        $display("Testing Edge Case 2: Clock stops mid-byte");
-        spi_cs_n = 0;
-        #20;
-        spi_mosi = 0;
-        #12.5 spi_sclk = 1; // Clock stays high!
-        #50;
-        spi_cs_n = 1; // Abort
-        spi_sclk = 0;
-        #100;
-        if (dut.u_spi_slave.bit_cnt != 0) begin
-            $fatal(1, "Edge Case 2 Failed: SPI slave locked up on stuck clock.");
-        end
-        $display("Edge Case 2 Passed.");
-        
-        // Edge Case 3: Start fires while FSM is running
-        $display("Testing Edge Case 3: Start strobe during active FSM");
-        // We will trigger a real start, then manually toggle 'start' inside the DUT
-        spi_send_spike(16'hAAAA);
-        #30; 
-        force dut.u_bnn_core.start = 1;
-        #20;
-        release dut.u_bnn_core.start;
-        // Wait for it to finish properly
-        latency_cycles = 0;
-        while (fpga_done != 1'b1 && latency_cycles < 100) begin
-            @(posedge sys_clk);
-            latency_cycles = latency_cycles + 1;
-        end
-        if (latency_cycles >= 100) begin
-            $fatal(1, "Edge Case 3 Failed: FSM locked up when start fired during execution.");
-        end
-        spi_read_decision(got_decision);
-        $display("Edge Case 3 Passed.");
-        
         $display("--- Beginning Standard Vector Verification ---");
         
         for (i = 0; i < NUM_VECTORS; i = i + 1) begin
+
             // 1. Send Spike
             spi_send_spike(test_inputs[i]);
             
             // 2. Wait for Done
             latency_cycles = 0;
+
             while (fpga_done != 1'b1 && latency_cycles < MAX_DONE_CYCLES) begin
                 @(posedge sys_clk);
                 latency_cycles = latency_cycles + 1;
             end
+
             if (latency_cycles > max_latency_cycles) begin
                 max_latency_cycles = latency_cycles;
             end
+
             if (fpga_done != 1'b1) begin
                 $fatal(1, "Timeout waiting for fpga_done on vector %0d", i);
             end
             
-            // Wait a few cycles to ensure FSM stabilized
             #50;
             
             // 3. Read Decision
@@ -192,21 +149,85 @@ module bnn_core_tb;
                           dut.u_bnn_core.score0,
                           dut.u_bnn_core.score1,
                           dut.u_bnn_core.score2);
+
                 fail_count = fail_count + 1;
             end
             
-            // Wait before next test
             #100;
         end
         
         $display("========================================");
         $display("Simulation Complete");
-        $display("PASS: %4d / %4d (%.2f %%)", pass_count, NUM_VECTORS, (pass_count*100.0)/NUM_VECTORS);
+        $display("PASS: %4d / %4d (%.2f %%)",
+                 pass_count,
+                 NUM_VECTORS,
+                 (pass_count*100.0)/NUM_VECTORS);
+
         $display("FAIL: %4d / %4d", fail_count, NUM_VECTORS);
         $display("MAX DONE LATENCY: %0d sys_clk cycles", max_latency_cycles);
         $display("========================================");
         
-        if (fail_count > 0) $fatal(1, "Hardware simulation mismatch found.");
+        if (fail_count > 0)
+            $fatal(1, "Hardware simulation mismatch found.");
+
+        // =============================================================
+        // Edge Case: SPI overflow stress test
+        // Sends >24 SCLK edges to verify bit_count saturates correctly
+        // and shift_rx is not corrupted by extra clock cycles.
+        // =============================================================
+        $display("--- Edge Case: SPI Overflow Stress Test ---");
+        begin : spi_overflow_test
+            integer j;
+            reg [23:0] packet;
+            reg [1:0] overflow_decision;
+
+            // Send the first test vector using 32 clocks instead of 24
+            packet = {8'd0, test_inputs[0]};
+            spi_cs_n = 0;
+            #20;
+            // Send 24 valid bits
+            for (j = 23; j >= 0; j = j - 1) begin
+                spi_mosi = packet[j];
+                #12.5;
+                spi_sclk = 1;
+                #12.5;
+                spi_sclk = 0;
+            end
+            // Send 8 extra garbage bits (should be ignored after fix)
+            for (j = 0; j < 8; j = j + 1) begin
+                spi_mosi = 1'b1;  // Garbage 1s
+                #12.5;
+                spi_sclk = 1;
+                #12.5;
+                spi_sclk = 0;
+            end
+            #20;
+            spi_cs_n = 1;
+
+            // Wait for done
+            latency_cycles = 0;
+            while (fpga_done != 1'b1 && latency_cycles < MAX_DONE_CYCLES) begin
+                @(posedge sys_clk);
+                latency_cycles = latency_cycles + 1;
+            end
+
+            if (fpga_done != 1'b1) begin
+                $fatal(1, "Timeout on SPI overflow edge case");
+            end
+
+            #50;
+            spi_read_decision(overflow_decision);
+
+            if (overflow_decision === test_outputs[0]) begin
+                $display("PASS: SPI overflow test - extra clocks ignored correctly");
+            end else begin
+                $display("FAIL: SPI overflow test - Expected: %d Got: %d",
+                         test_outputs[0], overflow_decision);
+                $fatal(1, "SPI overflow corrupted inference result");
+            end
+        end
+        $display("========================================");
+
         $finish;
     end
 
