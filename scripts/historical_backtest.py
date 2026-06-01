@@ -36,7 +36,7 @@ def run_backtest():
     model = train_bnn.build_model()
     try:
         model.load_weights(str(ROOT / "bnn_weights.h5"))
-    except:
+    except Exception:
         print("Model weights not found. Please train the model first.")
         sys.exit(1)
 
@@ -78,14 +78,14 @@ def run_backtest():
             tick_count += 1
             
             if ready and tick_count % 10 == 0: # Downsample inference for speed in backtest
-                # Form input vector: 16 bits
-                # We can either use the `spike` directly if we mapped it, but the python model takes the raw features.
-                # Actually, the python model takes the features and does the bin_dense natively.
-                # Let's extract the feature array matching the training:
-                # [rsi, momentum, volume_ratio, volatility]
-                x_val = np.array([[ind["rsi"], ind["momentum"], ind["volume_ratio"], ind["volatility"]]])
-                # Predict
-                pred = model.predict(x_val, verbose=0)
+                # FIX: The BNN model expects a 16-dimensional bipolar {-1, +1} input
+                # (the quantized spike vector), NOT 4 raw float indicators.
+                # Convert the uint16 spike bitmask to a 16-element bipolar array.
+                spike_bipolar = np.array([
+                    1.0 if (spike >> b) & 1 else -1.0
+                    for b in range(16)
+                ], dtype=np.float32).reshape(1, 16)
+                pred = model.predict(spike_bipolar, verbose=0)
                 decision = np.argmax(pred[0]) # 0=BUY, 1=HOLD, 2=SELL
                 
                 # Trading Logic
