@@ -657,11 +657,11 @@ def verify_fpga(model, X_test: np.ndarray,
             print(f"    {d}")
 
     if match_rate >= 99.0:
-        print("\n  ✅ HARDWARE SIMULATION VALIDATED — weights are FPGA-safe")
+        print("\n   HARDWARE SIMULATION VALIDATED — weights are FPGA-safe")
     elif match_rate >= 95.0:
-        print("\n  ⚠  Match rate acceptable but check mismatch samples above")
+        print("\n   Match rate acceptable but check mismatch samples above")
     else:
-        print("\n  ❌ CRITICAL MISMATCH — do NOT flash weights; debug required")
+        print("\n   CRITICAL MISMATCH — do NOT flash weights; debug required")
 
     return match_rate
 
@@ -729,9 +729,9 @@ def main():
     print(f"  BRAM usage       : {(16*64+64*3)/1024:.3f} kbits / 32 kbits")
 
     if match_rate >= 99.0 and acc >= 0.70:
-        print("\n  ✅ PHASE 1 COMPLETE — Ready for Phase 2 (ESP32 Firmware)")
+        print("\n   PHASE 1 COMPLETE — Ready for Phase 2 (ESP32 Firmware)")
     else:
-        print("\n  ⚠  Phase 1 incomplete — see warnings above before proceeding")
+        print("\n   Phase 1 incomplete — see warnings above before proceeding")
 
     print("="*60)
 
