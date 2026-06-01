@@ -73,7 +73,12 @@ esp_err_t bnn_spi_init(bnn_spi_t *iface, const bnn_spi_config_t *cfg)
 
 esp_err_t bnn_spi_tx_async(bnn_spi_t *iface, uint16_t spike_vector, uint8_t control)
 {
-    const uint32_t packet = ((uint32_t)(control & 0x3u) << 16) | spike_vector;
+    // Pack 24-bit SPI frame: [23:16]=control byte, [15:0]=payload.
+    // FIX: Previously masked control to 2 bits ((control & 0x3u) << 16),
+    // placing it at bits [17:16]. The FPGA checks packet_sclk[23] to
+    // distinguish BRAM writes from inference, so the full byte must
+    // occupy [23:16]. For inference: control=0x00. For BRAM write: control=0x80.
+    const uint32_t packet = ((uint32_t)control << 16) | spike_vector;
     
     // Write to DMA-capable buffer
     iface->tx_buf[0] = (uint8_t)((packet >> 16) & 0xffu);
