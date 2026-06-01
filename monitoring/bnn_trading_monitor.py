@@ -113,6 +113,19 @@ class BNNTradingMonitor:
         sorted_latencies = sorted(latencies)
         p99_idx = int(0.99 * (len(sorted_latencies) - 1))
         
+        # Per-class latency breakdown
+        latency_by_class = {}
+        for class_name, class_id in [("BUY", 0), ("HOLD", 1), ("SELL", 2)]:
+            class_lats = [r.latency_ns for r in self.history if r.decision == class_id]
+            if class_lats:
+                latency_by_class[class_name] = {
+                    "mean": round(statistics.mean(class_lats), 1),
+                    "min": min(class_lats),
+                    "max": max(class_lats)
+                }
+            else:
+                latency_by_class[class_name] = None
+        
         return {
             "total_inferences": len(self.history),
             "decision_distribution": {
@@ -129,10 +142,13 @@ class BNNTradingMonitor:
                 "trade_count": self.trade_count
             },
             "latency_ns": {
-                "min": min(latencies),
-                "mean": statistics.mean(latencies),
-                "p99": sorted_latencies[p99_idx],
-                "max": max(latencies),
+                "aggregate": {
+                    "min": min(latencies),
+                    "mean": round(statistics.mean(latencies), 1),
+                    "p99": sorted_latencies[p99_idx],
+                    "max": max(latencies),
+                },
+                "by_class": latency_by_class,
                 "sla": self.latency_sla_ns,
             },
             "sla_breach_count": sum(1 for r in self.history if r.latency_ns > self.latency_sla_ns),
