@@ -134,6 +134,23 @@ class BipolarQuantizer:
 
     Every bit is strictly ∈ {-1, +1}.  Neutral zones are left at their
     initialised -1 (not 0), ensuring the XNOR math never sees a unipolar 0.
+
+    ENCODING EQUIVALENCE:
+      This Python quantizer uses bipolar {-1, +1} encoding for training.
+      The C firmware (quantization.c) produces binary {0, 1} bitmasks.
+      The conversion is: bit = (bipolar + 1) / 2.
+
+      Under XNOR-popcount, these two representations are equivalent:
+        XNOR(0, 0) = 1  ↔  (-1) × (-1) = +1  (agreement)
+        XNOR(1, 1) = 1  ↔  (+1) × (+1) = +1  (agreement)
+        XNOR(0, 1) = 0  ↔  (-1) × (+1) = -1  (disagreement)
+
+      The FPGA hardware operates in {0, 1} space natively (XNOR gates).
+      The training pipeline operates in {-1, +1} space (bipolar matmul).
+      Both produce identical popcount results for the same logical inputs.
+
+      See also: fpga_inference_sim() which performs the domain conversion
+      via x_bits = ((x_bipolar + 1) // 2) for verification.
     """
 
     def __init__(self):
@@ -154,14 +171,10 @@ class BipolarQuantizer:
         volt = ind['volatility']
 
         # --- REGIME BITS ---
-        # Bit 0: overbought vs oversold (fired only outside neutral [30,70])
-        if rsi > self.rsi_high:
-            v[0] =  1.0
-        elif rsi < self.rsi_low:
-            v[0] = -1.0
-        # else: neutral zone — leave at -1 (known default, no ambiguity)
-
-        v[1] =  1.0 if rsi > 50 else -1.0          # Bit 1: bullish bias
+        # Fix: RSI Neutrality. Use 2 bits to strictly separate Oversold, Overbought, and Neutral
+        v[0] =  1.0 if rsi > self.rsi_high else -1.0       # Bit 0: Overbought
+        v[1] =  1.0 if rsi < self.rsi_low else -1.0        # Bit 1: Oversold
+        # Neutral zone (30 <= rsi <= 70) results in v[0]=-1, v[1]=-1 (strictly separable)
 
         if abs(mom) > self.momentum_thr:
             v[2] =  1.0 if mom > 0 else -1.0        # Bit 2: direction
@@ -315,6 +328,39 @@ def train_model(model, X_tr, y_tr, X_val, y_val):
         ],
         verbose=1
     )
+    
+    # --- Plot and Save Training Curve ---
+    import matplotlib.pyplot as plt
+    plt.style.use('dark_background')
+    fig, ax1 = plt.subplots(figsize=(9, 5))
+    
+    color = 'tab:cyan'
+    ax1.set_xlabel('Epoch', fontweight='bold')
+    ax1.set_ylabel('Categorical Crossentropy Loss', color=color, fontweight='bold')
+    ax1.plot(history.history['loss'], label='Train Loss', color=color, linewidth=2)
+    ax1.plot(history.history['val_loss'], label='Val Loss', color=color, linestyle='--', linewidth=2)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, alpha=0.2)
+    
+    ax2 = ax1.twinx()  
+    color = 'tab:orange'
+    ax2.set_ylabel('Accuracy', color=color, fontweight='bold')
+    ax2.plot(history.history['accuracy'], label='Train Acc', color=color, linewidth=2)
+    ax2.plot(history.history['val_accuracy'], label='Val Acc', color=color, linestyle='--', linewidth=2)
+    ax2.tick_params(axis='y', labelcolor=color)
+    
+    fig.tight_layout()
+    plt.title('BNN Hardware-Accurate Training Convergence', fontweight='bold')
+    
+    # Combined legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right')
+    
+    Path("media").mkdir(exist_ok=True)
+    plt.savefig('media/bnn_training_loss.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
     return history.history
 
 
