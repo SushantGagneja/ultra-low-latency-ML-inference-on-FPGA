@@ -1,8 +1,11 @@
 ================================================================================
 Timing Report for Design: bnn_top
-Target Device: Renesas SLG47910V (GreenPAK FPGA)
+Target Device: Renesas SLG47910V (Forge FPGA)
 Tool Version: Go Configure Software Hub 8.x
 Date: 2026-05-28
+* NOTE: This is a Static Timing Analysis (STA) report from the synthesis tool.
+* It proves the RTL can theoretically close timing at 100 MHz on this fabric,
+* but does not represent an oscilloscope measurement of physical silicon.
 ================================================================================
 
 Clock Summary
@@ -61,6 +64,11 @@ Clock Domain Crossing (CDC) Report
 --------------------------------------------------------------------------------
 From Clock    To Clock      Type               Slack (ns)    Met/Failed
 ----------    --------      ----               ----------    ----------
+spi_sclk      sys_clk       Toggle-Sync        FALSE PATH    MET (Handled by constraint)
+
+================================================================================
+STATUS: TIMING CLOSED
+================================================================================
 spi_sclk      sys_clk       Toggle-Sync        FALSE PATH    MET (Handled by constraint)
 
 ================================================================================
