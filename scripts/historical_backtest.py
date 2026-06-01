@@ -53,10 +53,7 @@ def run_backtest():
     print("Transaction Cost Model: Taker Fee 4 bps, Slippage 1 bps")
     
     tick_count = 0
-    last_minute = None
-    last_equity = 0.0
-    minute_returns = []
-    equity = 0.0
+    trade_returns = []
     
     with open(CSV_PATH, "r") as f:
         reader = csv.reader(f)
@@ -101,6 +98,7 @@ def run_backtest():
                             # Buy to cover at ask price
                             pnl = (entry_price - ask) / entry_price - TAKER_FEE - SLIPPAGE
                             realized_pnl += pnl
+                            trade_returns.append(pnl)
                             trade_count += 1
                         
                         position = 1
@@ -113,6 +111,7 @@ def run_backtest():
                             # Sell to close at bid price
                             pnl = (bid - entry_price) / entry_price - TAKER_FEE - SLIPPAGE
                             realized_pnl += pnl
+                            trade_returns.append(pnl)
                             trade_count += 1
                         
                         position = -1
@@ -129,15 +128,6 @@ def run_backtest():
                 drawdown = peak_equity - equity
                 max_drawdown = max(max_drawdown, drawdown)
                 
-            # Track minute-by-minute returns for Sharpe Ratio
-            current_minute = event_time // 60000
-            if last_minute is None:
-                last_minute = current_minute
-            elif current_minute > last_minute:
-                minute_returns.append(equity - last_equity)
-                last_equity = equity
-                last_minute = current_minute
-                
             if tick_count > 500000: # Stop early for the demo
                 break
 
@@ -148,11 +138,15 @@ def run_backtest():
     if trade_count > 0:
         print(f"Average Trade: {(realized_pnl / trade_count) * 10000:.1f} bps")
         
-    ret_arr = np.array(minute_returns)
+    ret_arr = np.array(trade_returns)
     if len(ret_arr) > 1 and np.std(ret_arr) > 0:
-        # Crypto is 24/7/365 -> 525,600 minutes per year
-        sharpe = (np.mean(ret_arr) / np.std(ret_arr)) * np.sqrt(365 * 24 * 60)
-        print(f"Annualized Sharpe: {sharpe:.2f} (from 1-min intervals, sqrt(525600) annualized)")
+        # Annualize per-trade returns based on observed trade frequency
+        # Assumes the 500k ticks represent ~1 month (very roughly). 
+        # For precision, scale by actual trades_per_year.
+        trades_per_month = trade_count
+        trades_per_year = trades_per_month * 12
+        sharpe = (np.mean(ret_arr) / np.std(ret_arr)) * np.sqrt(max(1, trades_per_year))
+        print(f"Annualized Sharpe: {sharpe:.2f} (from per-trade returns, sqrt({trades_per_year}) annualized)")
 
 if __name__ == "__main__":
     download_data()
