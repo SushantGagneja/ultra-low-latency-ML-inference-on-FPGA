@@ -17,13 +17,34 @@ void bnn_quantizer_init(bnn_quantizer_t *q)
 
 uint16_t bnn_quantize_bipolar(bnn_quantizer_t *q, const bnn_indicators_t *ind)
 {
+    // -----------------------------------------------------------------------
+    // ENCODING EQUIVALENCE NOTE:
+    //
+    // This function produces a uint16_t bitmask in the {0, 1} domain:
+    //   bit=1  →  feature is active (e.g., RSI > 70)
+    //   bit=0  →  feature is inactive
+    //
+    // The Python training pipeline (train_bnn_standalone.py) uses bipolar
+    // {-1, +1} encoding:
+    //   +1 → feature active,  -1 → feature inactive
+    //
+    // These two representations are equivalent under XNOR-popcount:
+    //   XNOR(0, 0) = 1  ↔  (-1) × (-1) = +1  (agreement)
+    //   XNOR(1, 1) = 1  ↔  (+1) × (+1) = +1  (agreement)
+    //   XNOR(0, 1) = 0  ↔  (-1) × (+1) = -1  (disagreement)
+    //   XNOR(1, 0) = 0  ↔  (+1) × (-1) = -1  (disagreement)
+    //
+    // The conversion between domains is: bit = (bipolar + 1) / 2
+    // The FPGA's XNOR gates and Python's bipolar matmul produce identical
+    // popcount results, so no runtime conversion is needed.
+    // -----------------------------------------------------------------------
     uint16_t spike = 0u;
 
     if (ind->rsi > q->rsi_high) {
         spike |= (uint16_t)(1u << 0);
     }
 
-    if (ind->rsi > 50.0f) {
+    if (ind->rsi < q->rsi_low) {
         spike |= (uint16_t)(1u << 1);
     }
 
