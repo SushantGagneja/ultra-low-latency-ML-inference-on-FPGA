@@ -25,46 +25,45 @@ def generate_vectors(num_vectors=100):
         for i in range(64):
             w2_bin[i, j] = weights[1024 + j * 64 + i]
             
-    tb_out = open("rtl/testbench/test_vectors.v", "w")
-    tb_out.write("// Auto-generated test vectors\n")
-    tb_out.write(f"localparam NUM_VECTORS = {num_vectors};\n")
-    tb_out.write("reg [15:0] test_inputs [0:NUM_VECTORS-1];\n")
-    tb_out.write("reg [1:0]  test_outputs [0:NUM_VECTORS-1];\n\n")
-    tb_out.write("initial begin\n")
-    
-    np.random.seed(42)
-    for v_idx in range(num_vectors):
-        # Generate random 16-bit vector
-        v_bin = np.random.randint(0, 2, size=16)
+    with open("rtl/testbench/test_vectors.v", "w") as tb_out:
+        tb_out.write("// Auto-generated test vectors\n")
+        tb_out.write(f"localparam NUM_VECTORS = {num_vectors};\n")
+        tb_out.write("reg [15:0] test_inputs [0:NUM_VECTORS-1];\n")
+        tb_out.write("reg [1:0]  test_outputs [0:NUM_VECTORS-1];\n\n")
+        tb_out.write("initial begin\n")
         
-        # Layer 1
-        l1_out = np.zeros(64, dtype=int)
-        for j in range(64):
-            w = w1_bin[:, j]
-            xnor = 1 - np.bitwise_xor(v_bin, w)
-            pop = np.sum(xnor)
-            l1_out[j] = 1 if pop >= 8 else 0
+        np.random.seed(42)
+        for v_idx in range(num_vectors):
+            # Generate random 16-bit vector
+            v_bin = np.random.randint(0, 2, size=16)
             
-        # Layer 2
-        l2_out = np.zeros(3, dtype=int)
-        for j in range(3):
-            w = w2_bin[:, j]
-            xnor = 1 - np.bitwise_xor(l1_out, w)
-            l2_out[j] = np.sum(xnor)
+            # Layer 1
+            l1_out = np.zeros(64, dtype=int)
+            for j in range(64):
+                w = w1_bin[:, j]
+                xnor = 1 - np.bitwise_xor(v_bin, w)
+                pop = np.sum(xnor)
+                l1_out[j] = 1 if pop >= 8 else 0
+                
+            # Layer 2
+            l2_out = np.zeros(3, dtype=int)
+            for j in range(3):
+                w = w2_bin[:, j]
+                xnor = 1 - np.bitwise_xor(l1_out, w)
+                l2_out[j] = np.sum(xnor)
+                
+            # Argmax (winner take all)
+            # 0 = BUY, 1 = HOLD, 2 = SELL
+            prediction = int(np.argmax(l2_out))
             
-        # Argmax (winner take all)
-        # 0 = BUY, 1 = HOLD, 2 = SELL
-        prediction = int(np.argmax(l2_out))
-        
-        # Format for Verilog
-        hex_input = "".join([str(x) for x in reversed(v_bin)])
-        hex_val = int(hex_input, 2)
-        
-        tb_out.write(f"    test_inputs[{v_idx}] = 16'h{hex_val:04X};\n")
-        tb_out.write(f"    test_outputs[{v_idx}] = 2'd{prediction};\n")
-        
-    tb_out.write("end\n")
-    tb_out.close()
+            # Format for Verilog
+            hex_input = "".join([str(x) for x in reversed(v_bin)])
+            hex_val = int(hex_input, 2)
+            
+            tb_out.write(f"    test_inputs[{v_idx}] = 16'h{hex_val:04X};\n")
+            tb_out.write(f"    test_outputs[{v_idx}] = 2'd{prediction};\n")
+            
+        tb_out.write("end\n")
     print(f"Generated {num_vectors} test vectors in rtl/testbench/test_vectors.v")
 
 if __name__ == "__main__":
