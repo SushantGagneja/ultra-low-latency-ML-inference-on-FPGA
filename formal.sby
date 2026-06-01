@@ -7,6 +7,9 @@ expect pass
 smtbmc yices
 
 [script]
+# NOTE: [files] below provides paths relative to the project root (CWD).
+# SymbiYosys copies them flat into its work directory, so read -formal
+# uses basenames only. Run: sby -f formal.sby from the project root.
 read -formal bnn_core.v xnor_popcount.v
 prep -top bnn_core
 
