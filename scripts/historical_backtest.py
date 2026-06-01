@@ -53,6 +53,10 @@ def run_backtest():
     print("Transaction Cost Model: Taker Fee 4 bps, Slippage 1 bps")
     
     tick_count = 0
+    last_minute = None
+    last_equity = 0.0
+    minute_returns = []
+    equity = 0.0
     
     with open(CSV_PATH, "r") as f:
         reader = csv.reader(f)
@@ -64,6 +68,7 @@ def run_backtest():
             bid_qty = float(row[2])
             ask = float(row[3])
             ask_qty = float(row[4])
+            event_time = int(row[6]) # ms epoch
             price = 0.5 * (bid + ask)
             volume = bid_qty + ask_qty
             
@@ -124,6 +129,15 @@ def run_backtest():
                 drawdown = peak_equity - equity
                 max_drawdown = max(max_drawdown, drawdown)
                 
+            # Track minute-by-minute returns for Sharpe Ratio
+            current_minute = event_time // 60000
+            if last_minute is None:
+                last_minute = current_minute
+            elif current_minute > last_minute:
+                minute_returns.append(equity - last_equity)
+                last_equity = equity
+                last_minute = current_minute
+                
             if tick_count > 500000: # Stop early for the demo
                 break
 
@@ -133,6 +147,12 @@ def run_backtest():
     print(f"Max Drawdown: {max_drawdown * 100:.2f}%")
     if trade_count > 0:
         print(f"Average Trade: {(realized_pnl / trade_count) * 10000:.1f} bps")
+        
+    ret_arr = np.array(minute_returns)
+    if len(ret_arr) > 1 and np.std(ret_arr) > 0:
+        # Crypto is 24/7/365 -> 525,600 minutes per year
+        sharpe = (np.mean(ret_arr) / np.std(ret_arr)) * np.sqrt(365 * 24 * 60)
+        print(f"Annualized Sharpe: {sharpe:.2f} (from 1-min intervals, sqrt(525600) annualized)")
 
 if __name__ == "__main__":
     download_data()
