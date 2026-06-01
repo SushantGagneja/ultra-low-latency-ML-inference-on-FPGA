@@ -21,8 +21,13 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
+try:
+    import tensorflow as tf
+    import larq as lq
+    TF_AVAILABLE = True
+except ImportError:
+    TF_AVAILABLE = False
+    print("Warning: tensorflow or larq not found in train_bnn_standalone.py.")
 from typing import Tuple
 import json
 from pathlib import Path
