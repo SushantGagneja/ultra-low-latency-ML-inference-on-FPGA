@@ -461,6 +461,22 @@ def plot_weight_interpretability(X_test_bipolar: np.ndarray, w1_bin: np.ndarray)
             xnor = 1 - np.bitwise_xor(X_bits[:, i], w1_bin[i, j])
             agreement_rates[i, j] = np.mean(xnor)
             
+    # Marginal activation frequency per input bit
+    marginal_activation = np.mean(agreement_rates, axis=1)
+    
+    # Feature labels for plotting and printing
+    feature_labels = [
+        "0: Overbought", "1: Oversold", "2: Mom Dir", "3: Mom Mag",
+        "4: Vol High", "5: Vol Surge", "6: Volt High", "7: Volt Ext",
+        "8: RSI Δ Dir", "9: RSI Δ Mag", "10: Accel Dir", "11: Accel Mag",
+        "12: Vol Δ Dir", "13: Vol Δ Mag", "14: Volt Δ Dir", "15: Volt Δ Mag"
+    ]
+    
+    print("  Marginal Activation Frequency (Average XNOR Agreement) per Input Bit:")
+    for i in range(16):
+        print(f"    Bit {i:2d} ({feature_labels[i]:14s}) : {marginal_activation[i]:.4f} "
+              f"{'(Random/Unused)' if 0.45 < marginal_activation[i] < 0.55 else '(Meaningful signal)'}")
+            
     fig, ax = plt.subplots(figsize=(14, 6))
     plt.style.use('dark_background')
     
@@ -470,13 +486,6 @@ def plot_weight_interpretability(X_test_bipolar: np.ndarray, w1_bin: np.ndarray)
     ax.set_xlabel("Hidden Neurons (0-63)", fontweight='bold')
     ax.set_ylabel("Input Features (0-15)", fontweight='bold')
     
-    # Add input feature labels
-    feature_labels = [
-        "0: Overbought", "1: Oversold", "2: Mom Dir", "3: Mom Mag",
-        "4: Vol High", "5: Vol Surge", "6: Volt High", "7: Volt Ext",
-        "8: RSI Δ Dir", "9: RSI Δ Mag", "10: Accel Dir", "11: Accel Mag",
-        "12: Vol Δ Dir", "13: Vol Δ Mag", "14: Volt Δ Dir", "15: Volt Δ Mag"
-    ]
     ax.set_yticks(np.arange(16))
     ax.set_yticklabels(feature_labels, fontsize=8)
     
@@ -516,8 +525,8 @@ def extract_weights(model, output_dir: Path):
     # --- Verilog $readmemb file ---
     # Layout: neuron-major (neuron 0 all inputs, then neuron 1, …)
     # Matches the BRAM addressing scheme in the FSM:
-    #   addr = neuron_idx * N_INPUTS + input_idx
     with open(output_dir / "weights.mem", "w") as f:
+        f.write("// Fixture weights — regenerate with train_bnn_standalone.py after retraining.\n")
         f.write("// Layer 1: 64 neurons × 16 inputs = 1,024 bits\n")
         f.write("// Address layout: [neuron_j * 16 + input_i]\n")
         for j in range(64):
