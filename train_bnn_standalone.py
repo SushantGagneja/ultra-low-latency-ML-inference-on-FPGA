@@ -281,6 +281,80 @@ def generate_synthetic_data(n_samples: int = 12000) -> Tuple[np.ndarray, np.ndar
     print(f"  SELL    : {sell_c} ({100*sell_c/n_samples:.1f}%)")
     return X, y
 
+def load_real_data(csv_path: Path, max_ticks: int = 1000000) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Load real Binance tick data, adapt it to the feature extractor, and extract
+    bipolar spikes and deterministic labels.
+    """
+    import csv
+    import sys
+    sys.path.append(str(Path(__file__).parent))
+    from scripts.retrain_bookticker import BNNFeatureExtractor
+    
+    print(f"\nLoading real market data from {csv_path} (up to {max_ticks} ticks)...")
+    extractor = BNNFeatureExtractor()
+    X, y = [], []
+    buy_c = sell_c = hold_c = 0
+    
+    with open(csv_path, "r") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        # Expected: updateId, best_bid_price, best_bid_qty, best_ask_price, best_ask_qty, transaction_time, event_time
+        
+        tick_count = 0
+        for row in reader:
+            if tick_count >= max_ticks:
+                break
+                
+            bid = float(row[1])
+            bid_qty = float(row[2])
+            ask = float(row[3])
+            ask_qty = float(row[4])
+            
+            # Explicit adapter for real market ticks
+            price = 0.5 * (bid + ask)
+            volume = bid_qty + ask_qty
+            
+            tick = {
+                "price": price,
+                "volume": volume,
+                "bid": bid,
+                "ask": ask
+            }
+            
+            ready, ind, spike = extractor.update(tick)
+            tick_count += 1
+            
+            if ready:
+                # spike is a uint16_t bitmask.
+                # Convert back to bipolar array for the model to train on.
+                spike_bipolar = np.array([
+                    1.0 if (spike >> b) & 1 else -1.0
+                    for b in range(16)
+                ], dtype=np.float32)
+                
+                rsi = ind['rsi']
+                mom = ind['momentum']
+                
+                if rsi > 70 and mom > 0.004:
+                    label = [0, 0, 1]; sell_c += 1          # SELL
+                elif rsi < 30 and mom < -0.004:
+                    label = [1, 0, 0]; buy_c  += 1          # BUY
+                else:
+                    label = [0, 1, 0]; hold_c += 1          # HOLD
+                    
+                X.append(spike_bipolar)
+                y.append(label)
+                
+    X = np.array(X, dtype=np.float32)
+    y = np.array(y, dtype=np.float32)
+    
+    print(f"  Valid Samples : {len(X)}")
+    print(f"  BUY           : {buy_c}  ({100*buy_c/len(X):.1f}%)")
+    print(f"  HOLD          : {hold_c} ({100*hold_c/len(X):.1f}%)")
+    print(f"  SELL          : {sell_c} ({100*sell_c/len(X):.1f}%)")
+    return X, y
+
 
 # ---------------------------------------------------------------------------
 # 5.  MODEL
@@ -367,6 +441,52 @@ def train_model(model, X_tr, y_tr, X_val, y_val):
     plt.close()
     
     return history.history
+
+def plot_weight_interpretability(X_test_bipolar: np.ndarray, w1_bin: np.ndarray):
+    """
+    Generate an interpretable heatmap of Layer 1 weights based on XNOR agreement
+    rates across the test set, rather than raw binary noise.
+    w1_bin is shape (16, 64) in {0,1}
+    X_test_bipolar is shape (N, 16) in {-1,+1}
+    """
+    import matplotlib.pyplot as plt
+    print("\nGenerating Layer 1 Weight Interpretability Heatmap...")
+    
+    X_bits = ((X_test_bipolar + 1) // 2).astype(np.int8)
+    agreement_rates = np.zeros((16, 64), dtype=np.float32)
+    
+    # Compute average XNOR agreement for each input bit (16) across each neuron (64)
+    for i in range(16):
+        for j in range(64):
+            xnor = 1 - np.bitwise_xor(X_bits[:, i], w1_bin[i, j])
+            agreement_rates[i, j] = np.mean(xnor)
+            
+    fig, ax = plt.subplots(figsize=(14, 6))
+    plt.style.use('dark_background')
+    
+    cax = ax.imshow(agreement_rates, cmap='coolwarm', aspect='auto', vmin=0, vmax=1)
+    
+    ax.set_title("Layer 1 XNOR Agreement Rate (Feature vs Neuron)", fontweight='bold', pad=15)
+    ax.set_xlabel("Hidden Neurons (0-63)", fontweight='bold')
+    ax.set_ylabel("Input Features (0-15)", fontweight='bold')
+    
+    # Add input feature labels
+    feature_labels = [
+        "0: Overbought", "1: Oversold", "2: Mom Dir", "3: Mom Mag",
+        "4: Vol High", "5: Vol Surge", "6: Volt High", "7: Volt Ext",
+        "8: RSI Δ Dir", "9: RSI Δ Mag", "10: Accel Dir", "11: Accel Mag",
+        "12: Vol Δ Dir", "13: Vol Δ Mag", "14: Volt Δ Dir", "15: Volt Δ Mag"
+    ]
+    ax.set_yticks(np.arange(16))
+    ax.set_yticklabels(feature_labels, fontsize=8)
+    
+    cbar = fig.colorbar(cax, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('XNOR Agreement Probability\n(1.0=Always Activates, 0.0=Always Suppresses)', rotation=270, labelpad=25)
+    
+    Path("media").mkdir(exist_ok=True)
+    plt.savefig('media/layer1_interpretability.png', dpi=300, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    print("  Saved to media/layer1_interpretability.png")
 
 
 # ---------------------------------------------------------------------------
@@ -551,12 +671,18 @@ def main():
     tf.random.set_seed(42)
 
     # --- Data ---
-    X, y = generate_synthetic_data(12000)
+    real_data_path = Path("BTCUSDT-bookTicker-2024-01.csv")
+    if real_data_path.exists():
+        X, y = load_real_data(real_data_path, max_ticks=1000000)
+    else:
+        print("\nWARNING: Real CSV data not found. Falling back to synthetic data.")
+        X, y = generate_synthetic_data(12000)
 
     n        = len(X)
     tr_end   = int(0.70 * n)
     val_end  = int(0.85 * n)
 
+    # STRICT chronological split — absolutely NO shuffling across boundaries
     X_train, y_train = X[:tr_end],       y[:tr_end]
     X_val,   y_val   = X[tr_end:val_end], y[tr_end:val_end]
     X_test,  y_test  = X[val_end:],       y[val_end:]
@@ -579,6 +705,10 @@ def main():
 
     # --- Verify hardware equivalence ---
     match_rate = verify_fpga(model, X_test, w1_bin, w2_bin)
+
+    # --- Weight Interpretability ---
+    if TF_AVAILABLE:
+        plot_weight_interpretability(X_test, w1_bin)
 
     # --- Summary ---
     print("\n" + "="*60)
