@@ -20,6 +20,8 @@ jobs:
           pip install numpy
 
       - name: Build RTL
+        # NOTE: This depends on fpga_weights/weights.mem existing in the repo.
+        # If the model is retrained locally, this fixture must be regenerated and committed.
         run: make build
 
       - name: Run RTL Simulation
