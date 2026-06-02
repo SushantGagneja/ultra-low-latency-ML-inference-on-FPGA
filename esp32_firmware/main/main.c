@@ -13,10 +13,8 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
-#include "quantization.h"
 #include "spi_interface.h"
-#include "temporal_features.h"
-#include "binance_ws.h"
+#include "udp_server.h"
 
 static const char *TAG = "bnn_phase2";
 
@@ -136,10 +134,10 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Initializing WiFi...");
     if (bnn_wifi_init_sta() == ESP_OK) {
-        ESP_LOGI(TAG, "Starting Binance WebSocket...");
-        err = bnn_binance_ws_start(tick_queue);
+        ESP_LOGI(TAG, "Starting UDP Server on port 8080...");
+        err = bnn_udp_server_start(8080, tick_queue);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Binance WebSocket failed to start: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "UDP Server failed to start: %s", esp_err_to_name(err));
             return;
         }
     } else {
