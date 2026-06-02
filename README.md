@@ -14,7 +14,7 @@ When measuring the full end-to-end Tick-to-Trade (T2T) latency—from the moment
 This repository was not built in a single iteration. It evolved through three distinct architectural stages, each exposing a critical bottleneck in standard embedded machine learning, forcing a radical redesign to achieve true quantitative execution speeds.
 
 ### Stage 1: Implementing a BNN on a Constrained FPGA (The "Lossy Boolean Gate")
-*   **The Goal:** Fit a functional Neural Network inside a tiny, $1 FPGA with only 1,120 LUTs.
+*   **The Goal:** Fit a functional Neural Network inside a tiny, FPGA with only 1,120 LUTs.
 *   **The Architecture:** We built a 16x64x3 Binary Neural Network (BNN). Because the SLG47910V has zero DSP slices (no hardware multipliers), all floating-point math was replaced by binary `XNOR` and popcount adder trees. Due to LUT constraints, we implemented a **Time-Multiplexed State Machine**—reading weights from a synchronous BRAM block and evaluating 4 neurons per cycle over a 23-cycle window (230ns latency).
 *   **The Flaw:** The ESP32 was doing all the heavy lifting. The RTOS firmware calculated RSI and Momentum in C, and sent a 16-bit vector to the FPGA. More critically, the BNN was trained to predict those exact static technical indicators. This was a severe case of the **"Lossy Boolean Gate" fallacy**—we built an over-engineered, 23-cycle neural network just to approximate a simple boolean rule (`if RSI > 70...`) that could have been written in 2 LUTs.
 
