@@ -14,7 +14,7 @@ When measuring the full end-to-end Tick-to-Trade (T2T) latency—from the moment
 This repository was not built in a single iteration. It evolved through three distinct architectural stages, each exposing a critical bottleneck in standard embedded machine learning, forcing a radical redesign to achieve true quantitative execution speeds.
 
 ### Stage 1: Implementing a BNN on a Constrained FPGA (The "Lossy Boolean Gate")
-*   **The Goal:** Fit a functional Neural Network inside a tiny, FPGA with only 1,120 LUTs.
+*   **The Goal:** Fit a functional Neural Network inside a tiny, $1 FPGA with only 1,120 LUTs.
 *   **The Architecture:** We built a 16x64x3 Binary Neural Network (BNN). Because the SLG47910V has zero DSP slices (no hardware multipliers), all floating-point math was replaced by binary `XNOR` and popcount adder trees. Due to LUT constraints, we implemented a **Time-Multiplexed State Machine**—reading weights from a synchronous BRAM block and evaluating 4 neurons per cycle over a 23-cycle window (230ns latency).
 *   **The Flaw:** The ESP32 was doing all the heavy lifting. The RTOS firmware calculated RSI and Momentum in C, and sent a 16-bit vector to the FPGA. More critically, the BNN was trained to predict those exact static technical indicators. This was a severe case of the **"Lossy Boolean Gate" fallacy**—we built an over-engineered, 23-cycle neural network just to approximate a simple boolean rule (`if RSI > 70...`) that could have been written in 2 LUTs.
 
@@ -54,15 +54,39 @@ This repository was not built in a single iteration. It evolved through three di
 
 The trading pipeline is distributed across three tightly-coupled domains: Model Training (Python), Market Ingestion (C/ESP32), and Hardware Inference (Verilog/FPGA).
 
-![System Architecture Pipeline](media/sys_arch.png)
+```mermaid
+flowchart LR
+    subgraph Host["MacBook (Go Gateway)"]
+        WS["Binance WSS TLS"] --> JSON["Zero-Alloc JSON Scanner"]
+        JSON --> PACK["16-Byte Binary Packer"]
+    end
 
-### 1. ESP32-S3 Network Ingestion 
-The firmware is engineered to operate in the hot path with strict deterministic bounds, connecting directly to the Binance `bookTicker` stream over TLS.
+    subgraph ESP32["ESP32-S3 (Microcontroller)"]
+        UDP["UDP Listener (Port 8080)"] --> DMA["Zero-Copy SPI DMA"]
+    end
 
-*   **Zero-Copy SPI DMA:** The ESP32 parses the JSON payload from the WebSocket and formats it into a raw 136-bit tick (Bid/Ask Prices and Quantities). It immediately fires a non-blocking DMA SPI transaction to stream the raw tick straight into the FPGA logic.
-*   **High-Resolution Cycle Profiling:** The firmware hooks directly into the Xtensa core's internal `CCOUNT` hardware register (via `esp_cpu_get_cycle_count()`) right before the DMA transaction, and again inside the FPGA `DONE` interrupt. This allows cycle-accurate measurement of the hardware Tick-to-Trade latency without relying on RTOS microsecond timers.
+    subgraph FPGA["SLG47910V (FPGA)"]
+        SPI["SPI Tick Parser"] --> FEAT["Hardware Feature Engines\n(OFI, VWAP, Lee-Ready)"]
+        FEAT --> QUANT["8-bit Quantizer"]
+        QUANT --> BNN["2-Cycle Unrolled BNN"]
+    end
 
-### 2. FPGA Hardware Microstructure & Inference
+    Host -- "UDP Socket" --> ESP32
+    ESP32 -- "SPI @ 40MHz" --> FPGA
+```
+
+### 1. The Decoupled Market Gateway (Go)
+To eliminate TLS decryption jitter and JSON parsing overhead from the embedded microcontroller, the heavy network lifting is offloaded to a high-performance Go gateway (`scripts/gateway/main.go`) running on a dedicated host (e.g., your MacBook or a co-located server).
+*   **Zero-Allocation Parsing:** The Go gateway connects to the Binance WebSocket, surgically extracts the raw price/quantity strings without allocating a JSON tree, and converts them to IEEE 754 floats.
+*   **Raw Binary Packing:** It packs the ticks into a dense, 16-byte raw binary payload and fires them over a local UDP socket directly to the ESP32.
+
+### 2. ESP32-S3 Zero-Copy UDP Ingestion 
+The firmware is engineered to operate in the hot path with absolute deterministic bounds.
+*   **Bare-Metal UDP Socket:** The ESP32 runs a hyper-lean UDP listener (`udp_server.c`), receiving the 16-byte payloads directly from the Go Gateway.
+*   **Zero-Copy SPI DMA:** The ESP32 immediately fires a non-blocking DMA SPI transaction to stream the raw 16 bytes straight into the FPGA logic.
+*   **High-Resolution Cycle Profiling:** The firmware hooks directly into the Xtensa core's internal `CCOUNT` hardware register (via `esp_cpu_get_cycle_count()`) right before the DMA transaction, and again inside the FPGA `DONE` interrupt. This allows cycle-accurate measurement of the hardware Tick-to-Trade latency.
+
+### 3. FPGA Hardware Microstructure & Inference
 The `bnn_top.v` module acts as a complete HFT subsystem, executing everything from parsing the raw tick to evaluating the final inference, completely independently of the ESP32.
 
 *   **Hardware Feature Engines:** 
@@ -86,12 +110,74 @@ $y = \text{popcount}(\sim(w \oplus x))$
 
 This fundamental shift allows neural networks to be executed entirely using XNOR gates and parallel adder trees, operating instantly in the boolean domain.
 
-![XNOR-Popcount ALU Logic](media/xnor_logic.png)
+```mermaid
+flowchart TD
+    subgraph Inputs ["8-Bit Spike Vector (From Quantizer)"]
+        I0[x0]
+        I1[x1]
+        I2[x2]
+        I3[x3]
+    end
+
+    subgraph Weights ["Ternary Weights (-1, 0, 1)"]
+        W0[w0 = +1]
+        W1[w1 = 0]
+        W2[w2 = -1]
+        W3[w3 = +1]
+    end
+
+    subgraph Logic ["Combinatorial Layer 1 (Clock 1)"]
+        X0["x0 (Direct Wire)"] 
+        X1["(Physical Wire Deleted)"]
+        X2["~x2 (Inverted Logic)"]
+        X3["x3 (Direct Wire)"]
+    end
+
+    I0 & W0 --> X0
+    I1 & W1 -. "Pruned by Generator" .-> X1
+    I2 & W2 --> X2
+    I3 & W3 --> X3
+
+    X0 --> SUM["Combinatorial Adder Tree"]
+    X2 --> SUM
+    X3 --> SUM
+
+    SUM --> REG["32-bit Pipeline Register"]
+
+    subgraph Output ["Layer 2 (Clock 2)"]
+        REG --> OUT_SUM["Output Adder Tree"]
+        OUT_SUM --> COMP["Threshold Comparator (V_j >= (P+N)/2)"]
+    end
+```
 
 ### FPGA Physical Tape-Down & Floorplan
-The following diagram illustrates how the logical architecture maps to the physical SLG47910V ForgeFPGA fabric and I/O ring. The architecture is severely I/O bound, dedicating 4 pins to the SPI bus, 1 for the System Clock, and 1 for the asynchronous Interrupt.
+The following diagram illustrates how the logical architecture maps to the physical SLG47910V ForgeFPGA fabric. We have completely eliminated BRAM blocks; the neural network is purely distributed across the LUT fabric.
 
-![SLG47910V Physical Floorplan](media/floorplan.png)
+```mermaid
+flowchart TD
+    subgraph Chip ["SLG47910V ForgeFPGA Fabric (1,120 LUTs)"]
+        direction TB
+        subgraph IO_TOP ["I/O Ring (Top)"]
+            direction LR
+            MOSI[MOSI] --- MISO[MISO] --- SCLK[SCLK] --- CS[CS_n]
+        end
+        
+        subgraph LOGIC ["Core Logic Fabric (100% LUTs, 0 BRAM, 0 DSP)"]
+            direction TB
+            PARSE["SPI Tick Parser\n(Toggle Synchronizer)"] --> ENGINES["Feature Engines\nOFI / VWAP / Lee-Ready"]
+            ENGINES --> BNN_L1["Combinatorial BNN Layer 1\n(Sparse Popcounts)"]
+            BNN_L1 --> REG["32-bit Pipeline Register\n(Timing Closure)"]
+            REG --> BNN_L2["Combinatorial BNN Layer 2\n(Output Tree)"]
+        end
+
+        subgraph IO_BOT ["I/O Ring (Bottom)"]
+            DONE[DONE Interrupt]
+        end
+
+        IO_TOP --> LOGIC
+        LOGIC --> IO_BOT
+    end
+```
 
 ### Unrolled Combinatorial Execution (Physical Wire Deletion)
 Because the network is aggressively pruned using Ternary Quantization-Aware Training (QAT), 95% of the network connections are exactly `0`. A custom Python generator script (`generate_bnn_rtl.py`) reads the PyTorch weights and synthesizes a fully unrolled `bnn_core_unrolled.v`. 
@@ -145,7 +231,8 @@ Because the ESP32 firmware utilizes DMA and tracks latency using the 240MHz Xten
 | Stage | Latency | Domain |
 |---|---|---|
 | Network delivery (Binance WS) | ~1–5 ms | Physics bound |
-| ESP32 WiFi stack parsing | ~15–50 µs | RTOS bound |
+| Go Gateway JSON parse & UDP TX | ~10 µs | Host CPU bound |
+| ESP32 UDP RX & SPI DMA setup | ~5–10 µs | RTOS bound |
 | SPI DMA TX (136 bits @ 40 MHz) | 3.4 µs | Hardware |
 | OFI + Lee-Ready computation | 10 ns (1 cycle) | Hardware |
 | VWAP computation | 350 ns (35 cycles) | Hardware |
