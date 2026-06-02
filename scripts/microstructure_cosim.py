@@ -11,15 +11,18 @@ SIM_DIR = ROOT / "sim"
 TB_SRC = ROOT / "rtl" / "testbench" / "microstructure_cosim_tb.v"
 
 def generate_test_vectors(csv_path: Path, limit: int = 1000):
-    from golden_lee_ready import GoldenLeeReady
+    from golden_lee_ready import GoldenLeeReady, to_unsigned
+    from golden_quantizer import GoldenQuantizer
     
     ticks = []
     golden_ofi = GoldenOFI()
     golden_vwap = GoldenVWAP()
     golden_lr = GoldenLeeReady()
+    golden_q = GoldenQuantizer()
     golden_outputs = []
     golden_vwap_outputs = []
     golden_lr_outputs = []
+    golden_q_outputs = []
     
     with open(csv_path, "r") as f:
         reader = csv.reader(f)
@@ -41,13 +44,25 @@ def generate_test_vectors(csv_path: Path, limit: int = 1000):
             v_valid, vwap = golden_vwap.update(bp, ap, bq, aq)
             lr_valid, lr_class = golden_lr.update(bp, ap)
             
+            midpoint = to_unsigned((bp + ap) >> 1, 32)
+            q_valid, spike_vector = golden_q.update(
+                ofi_q16_16=ofi,
+                vwap_q18_15=vwap,
+                midpoint=midpoint,
+                lr_class=lr_class,
+                ofi_valid=True, # ofi logic doesn't explicitly return valid flag in current script
+                vwap_valid=v_valid,
+                lr_valid=lr_valid
+            )
+            
             ticks.append((bp, bq, ap, aq))
             golden_outputs.append(ofi)
             golden_vwap_outputs.append((v_valid, vwap))
             golden_lr_outputs.append((lr_valid, lr_class))
+            golden_q_outputs.append((q_valid, spike_vector))
             
     print(f"Generated {len(ticks)} test vectors.")
-    return ticks, golden_outputs, golden_vwap_outputs, golden_lr_outputs
+    return ticks, golden_outputs, golden_vwap_outputs, golden_lr_outputs, golden_q_outputs
 
 def write_testbench(ticks: list):
     vector_file = ROOT / "rtl" / "testbench" / "microstructure_vectors.v"
@@ -89,6 +104,11 @@ def write_testbench(ticks: list):
             f.write("            $display(\"LR_OUT: %d\", microstructure_cosim_tb.lr_class_latched);\n")
             f.write("        end\n")
             
+            f.write("        $display(\"SPIKE_VALID: %d\", microstructure_cosim_tb.spike_valid_latched);\n")
+            f.write("        if (microstructure_cosim_tb.spike_valid_latched) begin\n")
+            f.write("            $display(\"SPIKE_OUT: %d\", microstructure_cosim_tb.spike_vector_latched);\n")
+            f.write("        end\n")
+            
         f.write("        $finish;\n")
         f.write("    end\n")
         f.write("endmodule\n")
@@ -113,6 +133,7 @@ def run_rtl_cosim(vector_file: Path):
         str(ROOT / "rtl" / "microstructure" / "restoring_divider.v"),
         str(ROOT / "rtl" / "microstructure" / "vwap_engine.v"),
         str(ROOT / "rtl" / "microstructure" / "lee_ready.v"),
+        str(ROOT / "rtl" / "microstructure" / "hw_quantizer.v"),
     ]
     
     subprocess.run(cmd, check=True)
@@ -122,6 +143,7 @@ def run_rtl_cosim(vector_file: Path):
     rtl_ofi = []
     rtl_vwap = []
     rtl_lr = []
+    rtl_q = []
     for line in res.stdout.splitlines():
         if line.startswith("OFI_OUT:"):
             val = int(line.split(":")[1].strip())
@@ -138,8 +160,14 @@ def run_rtl_cosim(vector_file: Path):
         elif line.startswith("LR_OUT:"):
             val = int(line.split(":")[1].strip())
             rtl_lr[-1]["class"] = val
+        elif line.startswith("SPIKE_VALID:"):
+            val = int(line.split(":")[1].strip())
+            rtl_q.append({"valid": val == 1, "spike": 0})
+        elif line.startswith("SPIKE_OUT:"):
+            val = int(line.split(":")[1].strip())
+            rtl_q[-1]["spike"] = val
             
-    return rtl_ofi, rtl_vwap, rtl_lr
+    return rtl_ofi, rtl_vwap, rtl_lr, rtl_q
 
 def main():
     csv_path = ROOT / "BTCUSDT-bookTicker-2024-01.csv"
@@ -147,9 +175,9 @@ def main():
         print(f"Error: {csv_path} not found.")
         sys.exit(1)
         
-    ticks, golden_outputs, golden_vwap_outputs, golden_lr_outputs = generate_test_vectors(csv_path, limit=1000)
+    ticks, golden_outputs, golden_vwap_outputs, golden_lr_outputs, golden_q_outputs = generate_test_vectors(csv_path, limit=1000)
     vector_file = write_testbench(ticks)
-    rtl_ofi, rtl_vwap, rtl_lr = run_rtl_cosim(vector_file)
+    rtl_ofi, rtl_vwap, rtl_lr, rtl_q = run_rtl_cosim(vector_file)
     
     if len(golden_outputs) != len(rtl_ofi):
         print(f"Mismatch in OFI count! Golden: {len(golden_outputs)}, RTL: {len(rtl_ofi)}")
@@ -185,10 +213,29 @@ def main():
             print(f"Tick {i} LR OUT Mismatch! Golden: {g_lr_class}, RTL: {r_lr_class}")
             mismatches += 1
             
+        g_q_valid, g_spike = golden_q_outputs[i]
+        r_q_dict = rtl_q[i]
+        r_q_valid, r_spike = r_q_dict["valid"], r_q_dict["spike"]
+        
+        # Quantizer Step 3: verify spike_valid is NEVER asserted if not valid
+        # Warmup domination
+        if i < 19:
+            if r_q_valid:
+                print(f"Tick {i} SPIKE VALID asserted prematurely! Should be warmup.")
+                mismatches += 1
+                
+        if g_q_valid != r_q_valid:
+            print(f"Tick {i} SPIKE VALID Mismatch! Golden: {g_q_valid}, RTL: {r_q_valid}")
+            mismatches += 1
+            
+        if g_q_valid and r_q_valid and g_spike != r_spike:
+            print(f"Tick {i} SPIKE OUT Mismatch! Golden: {bin(g_spike)}, RTL: {bin(r_spike)}")
+            mismatches += 1
+            
         if mismatches >= 10:
             print("Too many mismatches, aborting...")
             sys.exit(1)
-                
+    
 
 if __name__ == "__main__":
     main()
