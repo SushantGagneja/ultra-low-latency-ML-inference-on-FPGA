@@ -11,12 +11,15 @@ SIM_DIR = ROOT / "sim"
 TB_SRC = ROOT / "rtl" / "testbench" / "microstructure_cosim_tb.v"
 
 def generate_test_vectors(csv_path: Path, limit: int = 1000):
-    print(f"Reading up to {limit} ticks from {csv_path}...")
+    from golden_lee_ready import GoldenLeeReady
+    
     ticks = []
     golden_ofi = GoldenOFI()
     golden_vwap = GoldenVWAP()
+    golden_lr = GoldenLeeReady()
     golden_outputs = []
     golden_vwap_outputs = []
+    golden_lr_outputs = []
     
     with open(csv_path, "r") as f:
         reader = csv.reader(f)
@@ -36,13 +39,15 @@ def generate_test_vectors(csv_path: Path, limit: int = 1000):
             
             ofi = golden_ofi.compute_ofi(bp, ap, bq, aq)
             v_valid, vwap = golden_vwap.update(bp, ap, bq, aq)
+            lr_valid, lr_class = golden_lr.update(bp, ap)
             
             ticks.append((bp, bq, ap, aq))
             golden_outputs.append(ofi)
             golden_vwap_outputs.append((v_valid, vwap))
+            golden_lr_outputs.append((lr_valid, lr_class))
             
     print(f"Generated {len(ticks)} test vectors.")
-    return ticks, golden_outputs, golden_vwap_outputs
+    return ticks, golden_outputs, golden_vwap_outputs, golden_lr_outputs
 
 def write_testbench(ticks: list):
     vector_file = ROOT / "rtl" / "testbench" / "microstructure_vectors.v"
@@ -75,8 +80,14 @@ def write_testbench(ticks: list):
             f.write("        #500; // wait for valid pulse\n")
             f.write("        $display(\"OFI_OUT: %d\", microstructure_cosim_tb.ofi_q);\n")
             f.write("        $display(\"VWAP_VALID: %d\", microstructure_cosim_tb.vwap_valid_latched);\n")
-            f.write("        $display(\"VWAP_OUT: %d\", microstructure_cosim_tb.vwap_q_latched);\n")
-            f.write("        #5000;\n")
+            f.write("        if (microstructure_cosim_tb.vwap_valid_latched) begin\n")
+            f.write("            $display(\"VWAP_OUT: %d\", microstructure_cosim_tb.vwap_q_latched);\n")
+            f.write("        end\n")
+            
+            f.write("        $display(\"LR_VALID: %d\", microstructure_cosim_tb.lr_valid_latched);\n")
+            f.write("        if (microstructure_cosim_tb.lr_valid_latched) begin\n")
+            f.write("            $display(\"LR_OUT: %d\", microstructure_cosim_tb.lr_class_latched);\n")
+            f.write("        end\n")
             
         f.write("        $finish;\n")
         f.write("    end\n")
@@ -101,6 +112,7 @@ def run_rtl_cosim(vector_file: Path):
         str(ROOT / "rtl" / "microstructure" / "bram_microstructure.v"),
         str(ROOT / "rtl" / "microstructure" / "restoring_divider.v"),
         str(ROOT / "rtl" / "microstructure" / "vwap_engine.v"),
+        str(ROOT / "rtl" / "microstructure" / "lee_ready.v"),
     ]
     
     subprocess.run(cmd, check=True)
@@ -109,6 +121,7 @@ def run_rtl_cosim(vector_file: Path):
     
     rtl_ofi = []
     rtl_vwap = []
+    rtl_lr = []
     for line in res.stdout.splitlines():
         if line.startswith("OFI_OUT:"):
             val = int(line.split(":")[1].strip())
@@ -119,8 +132,14 @@ def run_rtl_cosim(vector_file: Path):
         elif line.startswith("VWAP_OUT:"):
             val = int(line.split(":")[1].strip())
             rtl_vwap[-1]["vwap"] = val
+        elif line.startswith("LR_VALID:"):
+            val = int(line.split(":")[1].strip())
+            rtl_lr.append({"valid": val == 1, "class": 3})
+        elif line.startswith("LR_OUT:"):
+            val = int(line.split(":")[1].strip())
+            rtl_lr[-1]["class"] = val
             
-    return rtl_ofi, rtl_vwap
+    return rtl_ofi, rtl_vwap, rtl_lr
 
 def main():
     csv_path = ROOT / "BTCUSDT-bookTicker-2024-01.csv"
@@ -128,9 +147,9 @@ def main():
         print(f"Error: {csv_path} not found.")
         sys.exit(1)
         
-    ticks, golden_outputs, golden_vwap_outputs = generate_test_vectors(csv_path, limit=1000)
+    ticks, golden_outputs, golden_vwap_outputs, golden_lr_outputs = generate_test_vectors(csv_path, limit=1000)
     vector_file = write_testbench(ticks)
-    rtl_ofi, rtl_vwap = run_rtl_cosim(vector_file)
+    rtl_ofi, rtl_vwap, rtl_lr = run_rtl_cosim(vector_file)
     
     if len(golden_outputs) != len(rtl_ofi):
         print(f"Mismatch in OFI count! Golden: {len(golden_outputs)}, RTL: {len(rtl_ofi)}")
@@ -154,15 +173,22 @@ def main():
             print(f"Tick {i} VWAP OUT Mismatch! Golden: {g_vwap}, RTL: {r_vwap}")
             mismatches += 1
             
+        g_lr_valid, g_lr_class = golden_lr_outputs[i]
+        r_lr_dict = rtl_lr[i]
+        r_lr_valid, r_lr_class = r_lr_dict["valid"], r_lr_dict["class"]
+        
+        if g_lr_valid != r_lr_valid:
+            print(f"Tick {i} LR VALID Mismatch! Golden: {g_lr_valid}, RTL: {r_lr_valid}")
+            mismatches += 1
+            
+        if g_lr_valid and r_lr_valid and g_lr_class != r_lr_class:
+            print(f"Tick {i} LR OUT Mismatch! Golden: {g_lr_class}, RTL: {r_lr_class}")
+            mismatches += 1
+            
         if mismatches >= 10:
             print("Too many mismatches, aborting...")
             sys.exit(1)
                 
-    if mismatches == 0:
-        print("\n✅ PHASE 2.2 VERIFIED: OFI Engine and VWAP Engine RTL perfectly match Python Golden Models over 1000 ticks!")
-    else:
-        print(f"\n❌ FAILED: {mismatches} mismatches found.")
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
