@@ -92,6 +92,21 @@ The bitstream was synthesized and deployed to a Renesas SLG47910V targeting a 10
 | **DSP Utilization** | 0 blocks | Pure XNOR-popcount integer logic |
 | **Synthetic Out-of-Sample Accuracy**| 82.94% | Evaluated on synthetic ticks matching live Binance BTCUSDT distributions |
 
+### System Latency Pipeline (Phase 2 Architecture)
+The central thesis of this project is that the FPGA compute latency is completely irrelevant to the system latency floor. As the following timeline demonstrates, the hardware extracts microstructural features and evaluates a neural network faster than the physics of the problem allows you to exploit. The bottleneck is the network stack.
+
+| Stage | Latency | Domain |
+|---|---|---|
+| Network delivery (Binance WS) | ~1–5 ms | Physics bound |
+| ESP32 WiFi stack + SPI frame | ~15–50 µs | RTOS bound |
+| SPI deserialization (136 bits @ 40 MHz) | 3.4 µs | Hardware |
+| OFI + Lee-Ready computation | 10 ns (1 cycle @ 100 MHz) | Hardware |
+| VWAP computation | 350 ns (35 cycles @ 100 MHz) | Hardware |
+| Quantizer synchronization | 0 ns (overlaps VWAP) | Hardware |
+| BNN inference | 230 ns (23 cycles @ 100 MHz) | Hardware |
+| **Total FPGA compute latency** | **~580 ns** | **Hardware** |
+| **Total system latency floor** | **~18–55 µs** | **Network + RTOS bound** |
+
 ### Synthesis Report (RTL Resource Utilization)
 The complete elimination of hardware multipliers yields an exceptionally lean logic footprint. The following is the synthesis output confirming logic cell and register utilization:
 
