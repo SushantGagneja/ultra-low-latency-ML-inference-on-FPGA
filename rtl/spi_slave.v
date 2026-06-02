@@ -98,7 +98,26 @@ module spi_slave (
         end
     end
     
-    // Clock Domain Crossing (CDC): Sample on cs_n rising edge in sys_clk domain
+    // Clock Domain Crossing (CDC): Safe Transfer
+    // Latch the 136-bit shift register into a holding register on the rising edge
+    // of the chip select (CS_n). This ensures the data is perfectly stable before
+    // the sys_clk domain samples it.
+    reg [135:0] packet_hold;
+    reg         packet_is_136_hold;
+    
+    always @(posedge cs_n or negedge rst_n) begin
+        if (!rst_n) begin
+            packet_hold <= 136'd0;
+            packet_is_136_hold <= 1'b0;
+        end else begin
+            if (bit_count == 8'd24 || bit_count == 8'd136) begin
+                packet_hold <= shift_rx;
+                packet_is_136_hold <= (bit_count == 8'd136);
+            end
+        end
+    end
+    
+    // Sample the holding register on the synchronized cs_n rising edge
     wire cs_n_rising = (cs_n_sync_for_latch[2:1] == 2'b01);
     reg packet_ready;
     reg packet_is_136_sclk;
@@ -119,11 +138,10 @@ module spi_slave (
             tick_start <= 1'b0;
             
             if (cs_n_rising) begin
-                if (bit_count == 8'd24 || bit_count == 8'd136) begin
-                    packet_sclk <= shift_rx;
-                    packet_is_136_sclk <= (bit_count == 8'd136);
-                    packet_ready <= 1'b1;
-                end
+                // Read from the CDC-safe holding register
+                packet_sclk <= packet_hold;
+                packet_is_136_sclk <= packet_is_136_hold;
+                packet_ready <= 1'b1;
             end else begin
                 packet_ready <= 1'b0;
             end
