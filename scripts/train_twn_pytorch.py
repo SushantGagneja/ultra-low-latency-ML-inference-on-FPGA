@@ -25,23 +25,29 @@ def ternary_quantize(x, threshold=0.05):
     return TernarySTE.apply(x, threshold)
 
 class TernaryLinear(nn.Module):
-    def __init__(self, in_features, out_features, threshold=0.05):
+    def __init__(self, in_features, out_features, threshold=0.05, bias=True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.threshold = threshold
         self.weight = nn.Parameter(torch.empty(out_features, in_features).uniform_(-0.5, 0.5))
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_features))
+        else:
+            self.register_parameter('bias', None)
         
     def forward(self, input):
-        # Binarize inputs if they aren't already (our inputs are -1 or 1, but intermediate activations need it)
-        # Actually, for the input layer, inputs are strictly {-1, 1}.
-        # For hidden activations, they will be binary {-1, 1} too.
         w_t = ternary_quantize(self.weight, self.threshold)
-        return torch.nn.functional.linear(input, w_t, bias=None)
+        return torch.nn.functional.linear(input, w_t, bias=self.bias)
         
     def get_ternary_weights(self):
         w_t = ternary_quantize(self.weight, self.threshold)
         return w_t.detach().cpu().numpy()
+        
+    def get_bias(self):
+        if self.bias is not None:
+            return self.bias.detach().cpu().numpy()
+        return np.zeros(self.out_features)
 
 class BinaryActivationSTE(torch.autograd.Function):
     @staticmethod
@@ -61,9 +67,9 @@ def binary_activation(x):
 class PredictiveMicrostructureBNN(nn.Module):
     def __init__(self):
         super().__init__()
-        # 8 Inputs -> 32 Hidden (Ternary) -> 1 Output (Ternary weights, but binary activation out? Or raw sum for BCE?)
-        self.fc1 = TernaryLinear(8, 32, threshold=0.1)
-        self.fc2 = TernaryLinear(32, 1, threshold=0.1)
+        # 32 Inputs (Temporal) -> 32 Hidden -> 3 Output (BUY, HOLD, SELL)
+        self.fc1 = TernaryLinear(32, 32, threshold=0.1, bias=True)
+        self.fc2 = TernaryLinear(32, 3, threshold=0.1, bias=True)
 
     def forward(self, x):
         x = self.fc1(x)
@@ -127,12 +133,17 @@ def generate_synthetic_data(n_samples=12000, k=5):
         for b in range(8):
             if np.random.rand() < 0.2:
                 spike[b] = -spike[b]
-                
-        X.append(spike)
-        y.append([label])
+        
+        # Temporal memory (simulate 4 ticks of history)
+        temporal_spike = np.full(32, -1.0, dtype=np.float32)
+        # Just inject current spike into the lowest 8 bits for synthetic purposes
+        temporal_spike[0:8] = spike
+        
+        X.append(temporal_spike)
+        y.append(label)
         
     X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.float32)
+    y = np.array(y, dtype=np.longlong)
     print(f"Generated {len(X)} valid samples (BUY: {buy_c}, SELL: {sell_c})")
     return X, y
 
@@ -153,7 +164,7 @@ def train():
     
     model = PredictiveMicrostructureBNN().to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.01)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.CrossEntropyLoss()
     
     lambda_l1 = 0.05  # Strong L1 to push weights to 0
     
@@ -163,16 +174,16 @@ def train():
         optimizer.zero_grad()
         
         logits = model(X)
-        bce_loss = criterion(logits, y)
+        ce_loss = criterion(logits, y)
         reg_loss = l1_regularization(model, lambda_l1)
-        loss = bce_loss + reg_loss
+        loss = ce_loss + reg_loss
         
         loss.backward()
         optimizer.step()
         
         if epoch % 20 == 0:
             # Eval acc
-            preds = (logits > 0.0).float()
+            preds = torch.argmax(logits, dim=1)
             acc = (preds == y).float().mean().item()
             
             w1 = model.fc1.get_ternary_weights()
@@ -181,13 +192,15 @@ def train():
             
             print(f"Epoch {epoch:3d} | Loss: {loss.item():.4f} | Acc: {acc*100:.1f}% | Sparsity: {sparsity*100:.1f}%")
 
-    w1 = model.fc1.get_ternary_weights() # shape: (32, 8)
-    w2 = model.fc2.get_ternary_weights() # shape: (1, 32)
+    w1 = model.fc1.get_ternary_weights() # shape: (32, 32)
+    w2 = model.fc2.get_ternary_weights() # shape: (3, 32)
+    b1 = model.fc1.get_bias()
+    b2 = model.fc2.get_bias()
     
     # Save the trained weights to npz for the generator script
     output_dir = Path("fpga_weights")
     output_dir.mkdir(exist_ok=True)
-    np.savez(output_dir / "ternary_weights.npz", w1=w1, w2=w2)
+    np.savez(output_dir / "ternary_weights.npz", w1=w1, w2=w2, b1=b1, b2=b2)
     print(f"Saved weights to {output_dir / 'ternary_weights.npz'}")
     
 if __name__ == "__main__":
