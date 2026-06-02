@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+
+# Data
+*.csv
+*.zip
+
+# Simulation & Waveforms
+sim/
+*.vcd
+*.vvp
+*.log
+
+# macOS
+.DS_Store
+
+# ESP-IDF
+build/
+sdkconfig
