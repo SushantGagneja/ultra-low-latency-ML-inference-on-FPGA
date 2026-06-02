@@ -15,8 +15,8 @@ module hw_quantizer (
     input  wire               lr_valid,
 
     // Output
-    output reg  [15:0] spike_vector,
-    output reg         spike_valid
+    output reg  [7:0] spike_vector,
+    output reg        spike_valid
 );
 
     reg ofi_valid_reg;
@@ -71,8 +71,6 @@ module hw_quantizer (
                 spike_vector[5] <= (midpoint_ext < vwap_aligned);
                 spike_vector[6] <= (lr_class == 2'b01);
                 spike_vector[7] <= (lr_class == 2'b10);
-                spike_vector[8] <= 1'b1;
-                spike_vector[15:9] <= 7'd0;
                 spike_valid <= 1'b1;
             end
         end
