@@ -385,7 +385,7 @@ def main():
     print(f"  BRAM usage       : {(16*64+64*3)/1024:.3f} kbits / 32 kbits")
 
     if match_rate >= 99.0 and acc >= 0.70:
-        print("\n  ✅ RETRAINING COMPLETE — Weights calibrated for bookTicker contract")
+        print("\n RETRAINING COMPLETE — Weights calibrated for bookTicker contract")
         print("  Next steps:")
         print("    1. python scripts/generate_test_vectors.py")
         print("    2. make")
