@@ -10,9 +10,21 @@ smtbmc yices
 # NOTE: [files] below provides paths relative to the project root (CWD).
 # SymbiYosys copies them flat into its work directory, so read -formal
 # uses basenames only. Run: sby -f formal.sby from the project root.
-read -formal bnn_core.v xnor_popcount.v
-prep -top bnn_core
+read_verilog -sv -formal bnn_top.v bnn_core.v xnor_popcount.v spi_slave.v bram_weights.v tick_parser.v ofi_engine.v lee_ready.v vwap_engine.v restoring_divider.v bram_microstructure.v hw_quantizer.v
+prep -top bnn_top
 
 [files]
+rtl/bnn_top.v
 rtl/bnn_core.v
 rtl/xnor_popcount.v
+rtl/spi_slave.v
+rtl/bram_weights.v
+rtl/microstructure/tick_parser.v
+rtl/microstructure/ofi_engine.v
+rtl/microstructure/lee_ready.v
+rtl/microstructure/vwap_engine.v
+rtl/microstructure/restoring_divider.v
+rtl/microstructure/bram_microstructure.v
+rtl/microstructure/hw_quantizer.v
+fpga_weights/weights.mem
+
