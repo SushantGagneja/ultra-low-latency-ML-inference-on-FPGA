@@ -21,9 +21,10 @@ module vwap_engine (
     // FSM States
     // --------------------------------------------------------
     localparam ST_IDLE    = 3'd0;
-    localparam ST_CYCLE_1 = 3'd1;
-    localparam ST_CYCLE_2 = 3'd2;
-    localparam ST_DIVWAIT = 3'd3;
+    localparam ST_MULWAIT = 3'd1;
+    localparam ST_CYCLE_1 = 3'd2;
+    localparam ST_CYCLE_2 = 3'd3;
+    localparam ST_DIVWAIT = 3'd4;
 
     reg [2:0] state;
 
@@ -44,6 +45,23 @@ module vwap_engine (
     
     wire [31:0] mid_price = (bid_price_q17_15 + ask_price_q17_15) >> 1;
     wire [31:0] total_qty = bid_qty_q16_16 + ask_qty_q16_16;
+
+    // --------------------------------------------------------
+    // Sequential Multiplier Interface
+    // --------------------------------------------------------
+    reg         mul_start;
+    wire        mul_done;
+    wire [63:0] mul_product;
+
+    sequential_multiplier u_mul (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(mul_start),
+        .a(mid_price),
+        .b(total_qty),
+        .done(mul_done),
+        .product(mul_product)
+    );
 
     // --------------------------------------------------------
     // BRAM Interface
@@ -108,18 +126,24 @@ module vwap_engine (
             // Default pulse clears
             vwap_valid <= 1'b0;
             div_start  <= 1'b0;
+            mul_start  <= 1'b0;
             
             case (state)
                 ST_IDLE: begin
                     if (tick_valid && !vwap_busy) begin
                         vwap_busy <= 1'b1;
                         
-                        // CYCLE 0:
-                        // Compute new PV and V in parallel
-                        new_pv_reg <= mid_price * total_qty;
+                        // CYCLE 0: Trigger sequential multiplier
+                        mul_start <= 1'b1;
+                        state     <= ST_MULWAIT;
+                    end
+                end
+                
+                ST_MULWAIT: begin
+                    if (mul_done) begin
+                        new_pv_reg <= {8'd0, mul_product};
                         new_v_reg  <= {16'd0, total_qty};
-                        
-                        state <= ST_CYCLE_1;
+                        state      <= ST_CYCLE_1;
                     end
                 end
                 
