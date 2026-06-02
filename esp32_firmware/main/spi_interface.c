@@ -91,8 +91,8 @@ esp_err_t bnn_spi_tx_async(bnn_spi_t *iface, uint16_t spike_vector, uint8_t cont
     iface->tx_buf[1] = (uint8_t)((packet >> 8) & 0xffu);
     iface->tx_buf[2] = (uint8_t)(packet & 0xffu);
 
-    // Queue transaction (non-blocking)
-    return spi_device_queue_trans(iface->dev, &iface->trans_tx, 0);
+    // Transmit (blocking) guarantees the SPI driver contract is not violated by concurrent UDP bursts
+    return spi_device_transmit(iface->dev, &iface->trans_tx);
 }
 
 esp_err_t bnn_spi_tx_tick(bnn_spi_t *iface, uint32_t bid_price_q, uint32_t bid_qty_q, uint32_t ask_price_q, uint32_t ask_qty_q)
@@ -126,21 +126,13 @@ esp_err_t bnn_spi_tx_tick(bnn_spi_t *iface, uint32_t bid_price_q, uint32_t bid_q
     iface->tx_buf_tick[15] = (uint8_t)(ask_qty_q >> 8);
     iface->tx_buf_tick[16] = (uint8_t)(ask_qty_q & 0xFF);
 
-    return spi_device_queue_trans(iface->dev, &iface->trans_tick, 0);
+    return spi_device_transmit(iface->dev, &iface->trans_tick);
 }
 
 esp_err_t bnn_spi_rx_sync(bnn_spi_t *iface, bnn_decision_t *decision)
 {
-    spi_transaction_t *ret_trans;
-    
-    // Get the result of the TX transaction to clear it from the queue
-    esp_err_t err = spi_device_get_trans_result(iface->dev, &ret_trans, portMAX_DELAY);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    // Now issue the synchronous RX transaction to read the decision
-    err = spi_device_transmit(iface->dev, &iface->trans_rx);
+    // Issue the synchronous RX transaction to read the decision
+    esp_err_t err = spi_device_transmit(iface->dev, &iface->trans_rx);
     if (err != ESP_OK) {
         return err;
     }
