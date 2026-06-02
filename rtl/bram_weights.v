@@ -47,7 +47,11 @@ module bram_weights (
             temp_ram[i] = 1'b0;
         end
         
+`ifdef FORMAL
+        $readmemb("weights.mem", temp_ram, 0, 1215);
+`else
         $readmemb("fpga_weights/weights.mem", temp_ram, 0, 1215);
+`endif
         
         // Pack 1-bit lines into 64-bit words
         for (i = 0; i < 32; i = i + 1) begin
