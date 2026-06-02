@@ -147,8 +147,8 @@ static void udp_server_task(void *pvParameters)
                 break;
             }
             
-            // Expected Gateway payload: exactly 16 bytes (4 float32s)
-            if (len == 16) {
+            // Expected Gateway payload: exactly 17 bytes (4 float32s + 1 byte metadata)
+            if (len == 17) {
                 bnn_market_tick_t tick;
                 memcpy(&tick, rx_buffer, sizeof(tick));
 
