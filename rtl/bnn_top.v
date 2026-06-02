@@ -29,6 +29,7 @@ module bnn_top (
     // Microstructure Pipeline Wires
     wire        tick_start;
     wire [127:0] tick_payload;
+    wire [7:0]   tick_metadata;
 
     // SPI Slave
     spi_slave u_spi_slave (
@@ -50,7 +51,8 @@ module bnn_top (
         
         // Microstructure outputs
         .tick_start(tick_start),
-        .tick_payload(tick_payload)
+        .tick_payload(tick_payload),
+        .tick_metadata(tick_metadata)
     );
     
     wire tick_valid;
@@ -69,7 +71,10 @@ module bnn_top (
     wire [1:0] lr_class;
     
     wire spike_valid;
-    wire [31:0] spike_vector;
+    wire [39:0] spike_vector;
+    
+    wire [1:0] velocity;
+    wire regime_select;
 
     // 1. Tick Parser
     tick_parser u_parser (
@@ -77,11 +82,14 @@ module bnn_top (
         .rst_n(rst_n),
         .tick_start(tick_start),
         .tick_payload(tick_payload),
+        .tick_metadata(tick_metadata),
         .tick_valid(tick_valid),
         .bid_price_q17_15(bid_price_q),
         .ask_price_q17_15(ask_price_q),
         .bid_qty_q16_16(bid_qty_q),
-        .ask_qty_q16_16(ask_qty_q)
+        .ask_qty_q16_16(ask_qty_q),
+        .velocity(velocity),
+        .regime_select(regime_select)
     );
 
     // 2. Lee-Ready
@@ -133,6 +141,7 @@ module bnn_top (
         .vwap_q18_15(vwap_q),
         .midpoint(midpoint),
         .lr_class(lr_class),
+        .velocity(velocity),
         .ofi_valid(ofi_valid),
         .vwap_valid(vwap_valid),
         .lr_valid(lr_valid),
@@ -142,7 +151,7 @@ module bnn_top (
 
     // Arbitration Logic
     wire bnn_start = bnn_start_legacy | spike_valid;
-    wire [31:0] bnn_spike_vector = bnn_start_legacy ? {16'd0, bnn_spike_legacy} : spike_vector;
+    wire [39:0] bnn_spike_vector = bnn_start_legacy ? {24'd0, bnn_spike_legacy} : spike_vector;
 
 `ifdef FORMAL
     // Formal verification: Arbitration Mutual Exclusion
@@ -161,7 +170,8 @@ module bnn_top (
         .clk(sys_clk),
         .rst_n(rst_n),
         .start(bnn_start),
-        .spike_vector(bnn_spike_vector), // Pass all 32 temporal bits
+        .spike_vector(bnn_spike_vector), // Pass all 40 temporal bits
+        .regime_select(regime_select),
         .done(bnn_done),
         .decision(bnn_decision)
     );
