@@ -23,14 +23,15 @@ module spi_slave (
     
     // Phase 2: Output to Tick Parser
     output reg         tick_start,
-    output reg [127:0] tick_payload
+    output reg [127:0] tick_payload,
+    output reg [7:0]   tick_metadata
 );
 
     // SCLK domain shift register
-    reg [135:0] shift_rx;
+    reg [143:0] shift_rx;
     reg [7:0]   bit_count;
     reg [2:0]   tx_bit_count;
-    reg [135:0] packet_sclk;
+    reg [143:0] packet_sclk;
     reg         packet_toggle_sclk;
 
     // CDC FIX: Latch bnn_decision into sys_clk domain on CS_n falling edge.
@@ -83,15 +84,15 @@ module spi_slave (
 
     always @(posedge sclk or negedge rst_n) begin
         if (!rst_n) begin
-            shift_rx <= 136'd0;
+            shift_rx <= 144'd0;
             bit_count <= 8'd0;
         end else begin
             if (!active) begin
-                shift_rx <= {135'd0, mosi};
+                shift_rx <= {143'd0, mosi};
                 bit_count <= 8'd1;
             end else begin
-                if (bit_count < 8'd136) begin
-                    shift_rx <= {shift_rx[134:0], mosi};
+                if (bit_count < 8'd144) begin
+                    shift_rx <= {shift_rx[142:0], mosi};
                     bit_count <= bit_count + 1'b1;
                 end
             end
@@ -99,20 +100,20 @@ module spi_slave (
     end
     
     // Clock Domain Crossing (CDC): Safe Transfer
-    // Latch the 136-bit shift register into a holding register on the rising edge
+    // Latch the 144-bit shift register into a holding register on the rising edge
     // of the chip select (CS_n). This ensures the data is perfectly stable before
     // the sys_clk domain samples it.
-    reg [135:0] packet_hold;
-    reg         packet_is_136_hold;
+    reg [143:0] packet_hold;
+    reg         packet_is_144_hold;
     
     always @(posedge cs_n or negedge rst_n) begin
         if (!rst_n) begin
-            packet_hold <= 136'd0;
-            packet_is_136_hold <= 1'b0;
+            packet_hold <= 144'd0;
+            packet_is_144_hold <= 1'b0;
         end else begin
-            if (bit_count == 8'd24 || bit_count == 8'd136) begin
+            if (bit_count == 8'd24 || bit_count == 8'd144) begin
                 packet_hold <= shift_rx;
-                packet_is_136_hold <= (bit_count == 8'd136);
+                packet_is_144_hold <= (bit_count == 8'd144);
             end
         end
     end
@@ -120,7 +121,7 @@ module spi_slave (
     // Sample the holding register on the synchronized cs_n rising edge
     wire cs_n_rising = (cs_n_sync_for_latch[2:1] == 2'b01);
     reg packet_ready;
-    reg packet_is_136_sclk;
+    reg packet_is_144_sclk;
     
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -131,6 +132,7 @@ module spi_slave (
             bram_wdata <= 8'd0;
             tick_start <= 1'b0;
             tick_payload <= 128'd0;
+            tick_metadata <= 8'd0;
         end else begin
             // Default pulse
             bnn_start <= 1'b0;
@@ -140,14 +142,14 @@ module spi_slave (
             if (cs_n_rising) begin
                 // Read from the CDC-safe holding register
                 packet_sclk <= packet_hold;
-                packet_is_136_sclk <= packet_is_136_hold;
+                packet_is_144_sclk <= packet_is_144_hold;
                 packet_ready <= 1'b1;
             end else begin
                 packet_ready <= 1'b0;
             end
             
             if (packet_ready) begin
-                if (!packet_is_136_sclk) begin
+                if (!packet_is_144_sclk) begin
                     // 24-bit frame decode
                     case (packet_sclk[23:16])
                         8'h80: begin // BRAM Write
@@ -162,11 +164,12 @@ module spi_slave (
                         default: ; // Drop unknown
                     endcase
                 end else begin
-                    // 136-bit frame decode
-                    case (packet_sclk[135:128])
+                    // 144-bit frame decode
+                    case (packet_sclk[143:136])
                         8'h10: begin // Raw Tick Stream
                             tick_start <= 1'b1;
-                            tick_payload <= packet_sclk[127:0];
+                            tick_payload <= packet_sclk[135:8]; // Prices and Quantities
+                            tick_metadata <= packet_sclk[7:0];  // Metadata byte
                         end
                         default: ; // Drop unknown
                     endcase
@@ -176,3 +179,4 @@ module spi_slave (
     end
 
 endmodule
+
