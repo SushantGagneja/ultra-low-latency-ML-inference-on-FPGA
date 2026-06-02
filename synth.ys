@@ -1,0 +1,4 @@
+read_verilog rtl/microstructure/*.v
+read_verilog rtl/*.v
+synth -top bnn_top -flatten
+stat
