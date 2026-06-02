@@ -35,13 +35,26 @@ module microstructure_cosim_tb;
     reg vwap_valid_latched = 0;
     reg [33:0] vwap_q_latched = 0;
     
+    // Lee-Ready Engine output
+    wire lr_valid;
+    wire [1:0] lr_class;
+    
+    // Latch LR for testbench reading
+    reg lr_valid_latched = 0;
+    reg [1:0] lr_class_latched = 0;
+    
     always @(posedge clk) begin
         if (vwap_valid) begin
             vwap_valid_latched <= 1'b1;
             vwap_q_latched <= vwap_q;
         end
+        if (lr_valid) begin
+            lr_valid_latched <= 1'b1;
+            lr_class_latched <= lr_class;
+        end
         if (tick_valid) begin
             vwap_valid_latched <= 1'b0; // clear on next tick
+            lr_valid_latched <= 1'b0;
         end
     end
     
@@ -105,6 +118,17 @@ module microstructure_cosim_tb;
         .vwap_valid(vwap_valid),
         .vwap_q18_15(vwap_q),
         .vwap_busy(vwap_busy)
+    );
+    
+    // Instantiate Lee-Ready Engine
+    lee_ready u_lr (
+        .clk(clk),
+        .rst_n(rst_n),
+        .tick_valid(tick_valid),
+        .bid_price_q17_15(bid_price_q),
+        .ask_price_q17_15(ask_price_q),
+        .lr_valid(lr_valid),
+        .lr_class(lr_class)
     );
     
     // Monitor write_ptr specifically for tick 21 wrap around
