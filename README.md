@@ -23,10 +23,15 @@ This repository was not built in a single iteration. It evolved through three di
 *   **The Architecture:** We ripped the feature extraction out of the C firmware. We built cycle-accurate, bit-exact RTL engines for **Order Flow Imbalance (OFI)**, **VWAP** (using a custom Restoring Divider for Q18.15 division), and **Lee-Ready Tick Aggression**. 
 *   **The Result:** The ESP32 was relegated to a Zero-Copy SPI DMA interface. It streamed the raw 136-bit Binance `bookTicker` payloads directly into the FPGA. The FPGA parsed the tick, computed the microstructural features, generated a spike vector in hardware, and ran the 23-cycle BNN. 
 
-### Stage 3: The Sparse Predictive Engine (Current Architecture)
+### Stage 3: The Sparse Predictive Engine
 *   **The Goal:** Generate real alpha by predicting forward market returns, and shrink the neural network to execute entirely in combinatorial logic.
-*   **The Architecture:** We shifted the objective function. Instead of predicting RSI, the network now predicts forward mid-price momentum ($M_{t+k} - M_{t}$). To handle this, we rewrote the training pipeline in PyTorch using **Ternary Quantization-Aware Training (QAT)** $\{-1, 0, +1\}$ combined with aggressive L1 Regularization (Lasso).
-*   **The Result:** The optimizer achieved **95.1% sparsity**. Because the network is so sparse, we completely deleted the BRAM and the 23-cycle state machine. A custom Python script now synthesizes a **fully unrolled, combinatorial logic tree** that executes the entire neural network in exactly 2 cycles.
+*   **The Architecture:** We shifted the objective function to predict forward mid-price momentum ($M_{t+k} - M_{t}$). The training pipeline was rewritten in PyTorch using **Ternary Quantization-Aware Training (QAT)** $\{-1, 0, +1\}$ combined with aggressive L1 Regularization.
+*   **The Result:** The optimizer achieved **95%+ sparsity**. We deleted the BRAM and state machine entirely. A custom Python script synthesizes a **fully unrolled, combinatorial logic tree** that executes the BNN in 2 cycles.
+
+### Stage 4: Mixture of Experts & Temporal Robustness (Current Architecture)
+*   **The Goal:** Prevent alpha decay caused by market regime shifts, prevent the network from collapsing during dead markets, and survive UDP network jitter.
+*   **The Architecture:** We implemented a 40-bit temporal memory (4 ticks) with a 2-bit time-delta (velocity) flag. To survive regime shifts, we trained a **Threshold-Multiplexed Mixture of Experts (MoE)**. We trained two models (Momentum and Ranging) with the exact same physical wire routing but different integer biases.
+*   **The Result:** The Go Gateway calculates the market regime and sends a 1-bit selector over a newly expanded 144-bit SPI frame. The hardware multiplexes *only* the integer popcount thresholds. We run two distinct "brains" on the exact same physical wires without doubling the LUT footprint.
 
 ---
 
@@ -58,7 +63,8 @@ The trading pipeline is distributed across three tightly-coupled domains: Model 
 flowchart LR
     subgraph Host["MacBook (Go Gateway)"]
         WS["Binance WSS TLS"] --> JSON["Zero-Alloc JSON Scanner"]
-        JSON --> PACK["16-Byte Binary Packer"]
+        JSON --> METADATA["Velocity & Regime Calc"]
+        METADATA --> PACK["17-Byte Binary Packer"]
     end
 
     subgraph ESP32["ESP32-S3 (Microcontroller)"]
@@ -66,9 +72,9 @@ flowchart LR
     end
 
     subgraph FPGA["SLG47910V (FPGA)"]
-        SPI["SPI Tick Parser"] --> FEAT["Hardware Feature Engines\n(OFI, VWAP, Lee-Ready)"]
-        FEAT --> QUANT["8-bit Quantizer"]
-        QUANT --> BNN["2-Cycle Unrolled BNN"]
+        SPI["SPI 144-bit Parser"] --> FEAT["Hardware Feature Engines\n(OFI, VWAP, Lee-Ready)"]
+        FEAT --> QUANT["10-bit Quantizer &\n40-bit Temporal Memory"]
+        QUANT --> BNN["Threshold-Multiplexed\nMoE BNN (2-Cycle)"]
     end
 
     Host -- "UDP Socket" --> ESP32
@@ -78,24 +84,25 @@ flowchart LR
 ### 1. The Decoupled Market Gateway (Go)
 To eliminate TLS decryption jitter and JSON parsing overhead from the embedded microcontroller, the heavy network lifting is offloaded to a high-performance Go gateway (`scripts/gateway/main.go`) running on a dedicated host (e.g., your MacBook or a co-located server).
 *   **Zero-Allocation Parsing:** The Go gateway connects to the Binance WebSocket, surgically extracts the raw price/quantity strings without allocating a JSON tree, and converts them to IEEE 754 floats.
-*   **Raw Binary Packing:** It packs the ticks into a dense, 16-byte raw binary payload and fires them over a local UDP socket directly to the ESP32.
+*   **Regime & Velocity:** The Gateway calculates the time elapsed between ticks ($\Delta t$) and evaluates the macro market regime, packing these into a 1-byte metadata flag.
+*   **Raw Binary Packing:** It packs the ticks and metadata into a dense, 17-byte raw binary payload and fires them over a local UDP socket directly to the ESP32.
 
 ### 2. ESP32-S3 Zero-Copy UDP Ingestion 
 The firmware is engineered to operate in the hot path with absolute deterministic bounds.
-*   **Bare-Metal UDP Socket:** The ESP32 runs a hyper-lean UDP listener (`udp_server.c`), receiving the 16-byte payloads directly from the Go Gateway.
-*   **Zero-Copy SPI DMA:** The ESP32 immediately fires a non-blocking DMA SPI transaction to stream the raw 16 bytes straight into the FPGA logic.
+*   **Bare-Metal UDP Socket:** The ESP32 runs a hyper-lean UDP listener (`udp_server.c`), receiving the 17-byte payloads directly from the Go Gateway.
+*   **Zero-Copy SPI DMA:** The ESP32 immediately fires a non-blocking DMA SPI transaction to stream exactly 144 bits (18 bytes = 1 cmd + 17 data) straight into the FPGA logic.
 *   **High-Resolution Cycle Profiling:** The firmware hooks directly into the Xtensa core's internal `CCOUNT` hardware register (via `esp_cpu_get_cycle_count()`) right before the DMA transaction, and again inside the FPGA `DONE` interrupt. This allows cycle-accurate measurement of the hardware Tick-to-Trade latency.
 
 ### 3. FPGA Hardware Microstructure & Inference
 The `bnn_top.v` module acts as a complete HFT subsystem, executing everything from parsing the raw tick to evaluating the final inference, completely independently of the ESP32.
 
 *   **Hardware Feature Engines:** 
-    *   **Tick Parser:** Deserializes the 136-bit SPI frame using a rigorously verified Clock Domain Crossing (CDC) toggle synchronizer.
+    *   **Tick Parser:** Deserializes the 144-bit SPI frame using a rigorously verified Clock Domain Crossing (CDC) toggle synchronizer, extracting prices, quantities, velocity, and regime select.
     *   **OFI Engine:** Computes Order Flow Imbalance (OFI) on a tick-by-tick basis using strict Q16.16 signed arithmetic.
-    *   **VWAP Engine:** Maintains a 20-tick sliding window Volume Weighted Average Price using an ultra-low-latency Restoring Divider (Q18.15) and a synchronous ring buffer.
+    *   **VWAP Engine:** Maintains a 20-tick sliding window Volume Weighted Average Price using an ultra-low-latency 32-cycle Sequential Multiplier and a Restoring Divider (Q18.15), saving ~1,000 LUTs over combinatorial math.
     *   **Lee-Ready Engine:** Classifies tick aggression (Buyer/Seller/Neutral) against the midpoint in a single cycle.
-*   **Hardware Quantization:** Synchronously captures the outputs of all three feature engines and dynamically evaluates thresholds to generate an ultra-dense **8-bit microstructural spike vector**.
-*   **BNN Inference Core:** The fully unrolled, 8x32x1 combinatorial popcount tree executes the pruned neural network on the spike vector.
+*   **Hardware Quantization:** Dynamically evaluates thresholds and maintains a 4-tick temporal shift register (40 bits total).
+*   **Threshold-Multiplexed MoE:** The fully unrolled, 40x32x3 combinatorial popcount tree executes the pruned neural network. It calculates the hidden nodes once, but dynamically multiplexes the integer thresholds based on the `regime_select` bit to swap between the Momentum Expert and Ranging Expert models.
 
 ---
 
@@ -112,7 +119,7 @@ This fundamental shift allows neural networks to be executed entirely using XNOR
 
 ```mermaid
 flowchart TD
-    subgraph Inputs ["8-Bit Spike Vector (From Quantizer)"]
+    subgraph Inputs ["40-Bit Temporal Memory (From Quantizer)"]
         I0[x0]
         I1[x1]
         I2[x2]
@@ -138,15 +145,16 @@ flowchart TD
     I2 & W2 --> X2
     I3 & W3 --> X3
 
-    X0 --> SUM["Combinatorial Adder Tree"]
+    X0 --> SUM["Combinatorial Adder Tree\n(40 Inputs Max)"]
     X2 --> SUM
     X3 --> SUM
 
-    SUM --> REG["32-bit Pipeline Register"]
+    SUM --> COMP_H["MUX Threshold Comparator\nV_j >= (Regime ? Thresh_A : Thresh_B)"]
+    COMP_H --> REG["32-bit Pipeline Register"]
 
     subgraph Output ["Layer 2 (Clock 2)"]
         REG --> OUT_SUM["Output Adder Tree"]
-        OUT_SUM --> COMP["Threshold Comparator (V_j >= (P+N)/2)"]
+        OUT_SUM --> COMP["MUX Threshold Comparator\nV_j >= (Regime ? Thresh_A : Thresh_B)"]
     end
 ```
 
@@ -164,10 +172,10 @@ flowchart TD
         
         subgraph LOGIC ["Core Logic Fabric (100% LUTs, 0 BRAM, 0 DSP)"]
             direction TB
-            PARSE["SPI Tick Parser\n(Toggle Synchronizer)"] --> ENGINES["Feature Engines\nOFI / VWAP / Lee-Ready"]
-            ENGINES --> BNN_L1["Combinatorial BNN Layer 1\n(Sparse Popcounts)"]
+            PARSE["SPI 144-bit Parser\n(Toggle Synchronizer)"] --> ENGINES["Feature Engines\nOFI / VWAP / Lee-Ready"]
+            ENGINES --> BNN_L1["MoE Layer 1 (Hidden)\n(Threshold-Multiplexed Popcounts)"]
             BNN_L1 --> REG["32-bit Pipeline Register\n(Timing Closure)"]
-            REG --> BNN_L2["Combinatorial BNN Layer 2\n(Output Tree)"]
+            REG --> BNN_L2["MoE Layer 2 (Output)\n(3-Class Output Tree)"]
         end
 
         subgraph IO_BOT ["I/O Ring (Bottom)"]
@@ -186,13 +194,13 @@ Because the network is aggressively pruned using Ternary Quantization-Aware Trai
 *   **Dynamic Threshold Balancing:** For connections with a weight of `-1`, the Python generator physically inverts the input bit (`~input`). The popcount threshold is mathematically re-balanced using the bound $V_j \ge \frac{|P| + |N|}{2}$, where $P$ and $N$ are the counts of positive and negative weights.
 
 ### The 2-Cycle Timing Constraint
-Because the network is fully unrolled, we could theoretically execute the entire 8x32x1 architecture in a single combinatorial clock cycle. However, attempting to evaluate 32 parallel popcount trees, and then feeding all 32 results into a massive output popcount tree in under 10ns on an incredibly dense, slow 1,120 LUT fabric will fail timing closure due to severe routing delays.
+Because the network is fully unrolled, we could theoretically execute the entire 40x32x3 architecture in a single combinatorial clock cycle. However, attempting to evaluate 32 parallel 40-input popcount trees, and then feeding all 32 results into massive output popcount trees in under 10ns on an incredibly dense, slow 1,120 LUT fabric will fail timing closure due to severe routing delays.
 
 To guarantee 100MHz timing closure, the unrolled generator script explicitly splits the logic with a single 32-bit pipeline register:
 | Cycle | Operation |
 |-------|-----------|
-| 1     | Compute Layer 1 (Hidden) via parallel combinatorial popcounts. Store activations in a 32-bit pipeline register. |
-| 2     | Compute Layer 2 (Output) from the hidden register. Latch Decision and assert DONE interrupt. |
+| 1     | Compute Layer 1 (Hidden) via parallel combinatorial popcounts, multiplexing thresholds via `regime_select`. Store activations in a 32-bit pipeline register. |
+| 2     | Compute Layer 2 (3-Class Output) from the hidden register, multiplexing thresholds via `regime_select`. Latch Decision and assert DONE interrupt. |
 
 ### Clock Domain Crossing (CDC)
 The SPI clock (up to 80 MHz) and the internal System Clock (100 MHz) are asynchronous. A traditional dual-flop synchronizer on the Chip Select line risks metastability if the SPI transaction finishes near a system clock edge. The design implements a closed-loop Toggle Synchronizer combined with negative edge sampling, ensuring the 136-bit payload is fully stable in a holding register before the internal FSM is triggered.
@@ -203,17 +211,22 @@ The SPI clock (up to 80 MHz) and the internal System Clock (100 MHz) are asynchr
 
 To generate true statistical edge, a model must predict non-linear, emergent microstructures. 
 
-### The Objective Function & Alpha
+### The Objective Function & MoE Experts
 The target label $Y$ looks $k$ ticks into the future based on the current mid-price $M_t$:
-*   **BUY (Class 1):** $M_{t+k} > M_t + \epsilon$ (Upward momentum prediction)
-*   **SELL (Class 0):** $M_{t+k} < M_t - \epsilon$ (Downward momentum prediction)
+*   **BUY (Class 0):** $M_{t+k} > M_t + \epsilon$
+*   **HOLD (Class 1):** Flat / Dead Market
+*   **SELL (Class 2):** $M_{t+k} < M_t - \epsilon$
 
-By feeding the network the 8-bit microstructural features (Order Flow Imbalance thresholds, VWAP divergence, Lee-Ready aggression), the model is forced to learn the hidden dynamics of the limit order book.
+By feeding the network the 40-bit temporal microstructural features (Order Flow Imbalance thresholds, VWAP divergence, Lee-Ready aggression, Velocity Flags), the model learns the non-linear sequences. We train two specific experts:
+*   **Momentum Expert (Model A):** Optimized for high-volatility breakouts. Trained with heavy L1 regularization.
+*   **Ranging Expert (Model B):** Optimized for mean-reverting regimes. Trained by **freezing** the exact sparsity mask of Model A and exclusively optimizing the biases.
+
+### Temporal Dropout & Apple Silicon Anchor
+To survive network unreliability (dropped UDP packets/WebSocket stutter), we execute Quantization-Aware Training (QAT) natively on Apple Silicon (MPS). A custom `TemporalDropout` layer randomly zeros out the $t_{-1}$ or $t_{-2}$ slices of the temporal memory in 5% of training batches. The model learns to build redundant pathways and gracefully output a high-conviction HOLD when the data stream fragments.
 
 ### Ternary Quantization & Sparsity
 To fit the model onto the SLG47910V fabric, we rely heavily on sparsity. The model is trained using **PyTorch** with a custom **Ternary Straight-Through Estimator** ($\{-1, 0, 1\}$).
-*   **L1 Regularization (Lasso):** The optimizer applies heavy L1 penalties during training.
-*   **Results:** The model achieves **94.1% accuracy** while pushing **95.1% of the weights to exactly 0**. Out of 288 possible connections in the 8x32x1 network, only 15 weights survive. 
+*   **Results:** Model A achieved **98.0% sparsity**. Because the weights of Model B were frozen, we maintained the exact same physical sparsity mask. The combinatorial RTL generated uses the exact same routing for both models, requiring virtually zero extra LUTs to implement the MoE architecture. Out of 1,376 possible connections in the 40x32x3 network, less than 30 weights survive. 
 
 *(For legacy reference on how BNN architectures compress rule-based targets, see the Stage 1 training convergence and confusion matrix below).*
 ![Training Convergence](media/bnn_training_loss.png)
