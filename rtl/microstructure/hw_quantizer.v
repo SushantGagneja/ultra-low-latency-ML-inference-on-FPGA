@@ -14,8 +14,8 @@ module hw_quantizer (
     input  wire               vwap_valid,
     input  wire               lr_valid,
 
-    // Output
-    output reg  [7:0] spike_vector,
+    // Output (32-bit temporal memory: 4 ticks x 8 bits)
+    output reg  [31:0] spike_vector,
     output reg        spike_valid
 );
 
@@ -54,23 +54,30 @@ module hw_quantizer (
     wire trigger_quantization = all_features_ready & ~all_features_ready_prev;
 
     wire [32:0] midpoint_ext = {1'b0, midpoint};
-    wire [32:0] vwap_aligned = vwap_q18_15[33:1];
+    // FIX: vwap_q18_15 is already aligned to Q18.15. midpoint is Q17.15.
+    // They both have 15 fractional bits. Direct comparison is mathematically sound.
+    wire [33:0] midpoint_ext2 = {2'b00, midpoint};
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            spike_vector <= 16'd0;
+            spike_vector <= 32'd0;
             spike_valid  <= 1'b0;
         end else begin
             spike_valid <= 1'b0;
             if (trigger_quantization) begin
+                // Shift existing memory left by 8 bits
+                spike_vector[31:8] <= spike_vector[23:0];
+                
+                // Inject current tick features into the lowest 8 bits
                 spike_vector[0] <= (ofi_q16_16 > 32'sd327680);
                 spike_vector[1] <= (ofi_q16_16 > 32'sd0);
                 spike_vector[2] <= (ofi_q16_16 < -32'sd327680);
                 spike_vector[3] <= (ofi_q16_16 < 32'sd0);
-                spike_vector[4] <= (midpoint_ext > vwap_aligned);
-                spike_vector[5] <= (midpoint_ext < vwap_aligned);
+                spike_vector[4] <= (midpoint_ext2 > vwap_q18_15);
+                spike_vector[5] <= (midpoint_ext2 < vwap_q18_15);
                 spike_vector[6] <= (lr_class == 2'b01);
                 spike_vector[7] <= (lr_class == 2'b10);
+                
                 spike_valid <= 1'b1;
             end
         end
