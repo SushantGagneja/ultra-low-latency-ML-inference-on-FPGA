@@ -12,7 +12,8 @@ esp_err_t bnn_spi_init(bnn_spi_t *iface, const bnn_spi_config_t *cfg)
     // Allocate DMA-capable buffers
     iface->tx_buf = heap_caps_malloc(4, MALLOC_CAP_DMA);
     iface->rx_buf = heap_caps_malloc(4, MALLOC_CAP_DMA);
-    if (!iface->tx_buf || !iface->rx_buf) {
+    iface->tx_buf_tick = heap_caps_malloc(20, MALLOC_CAP_DMA);
+    if (!iface->tx_buf || !iface->rx_buf || !iface->tx_buf_tick) {
         return ESP_ERR_NO_MEM;
     }
     
@@ -25,6 +26,11 @@ esp_err_t bnn_spi_init(bnn_spi_t *iface, const bnn_spi_config_t *cfg)
     iface->trans_rx.length = 8;
     iface->trans_rx.tx_buffer = NULL;
     iface->trans_rx.rx_buffer = iface->rx_buf;
+    
+    memset(&iface->trans_tick, 0, sizeof(spi_transaction_t));
+    iface->trans_tick.length = 136;
+    iface->trans_tick.tx_buffer = iface->tx_buf_tick;
+    iface->trans_tick.rx_buffer = NULL;
 
     spi_bus_config_t buscfg = {
         .mosi_io_num = cfg->mosi_io,
@@ -87,6 +93,40 @@ esp_err_t bnn_spi_tx_async(bnn_spi_t *iface, uint16_t spike_vector, uint8_t cont
 
     // Queue transaction (non-blocking)
     return spi_device_queue_trans(iface->dev, &iface->trans_tx, 0);
+}
+
+esp_err_t bnn_spi_tx_tick(bnn_spi_t *iface, uint32_t bid_price_q, uint32_t bid_qty_q, uint32_t ask_price_q, uint32_t ask_qty_q)
+{
+    // Frame format: 136 bits (17 bytes)
+    // [135:128] Control = 0x10
+    // [127:96]  Bid Price
+    // [95:64]   Bid Qty
+    // [63:32]   Ask Price
+    // [31:0]    Ask Qty
+    
+    iface->tx_buf_tick[0] = 0x10;
+    
+    iface->tx_buf_tick[1] = (uint8_t)(bid_price_q >> 24);
+    iface->tx_buf_tick[2] = (uint8_t)(bid_price_q >> 16);
+    iface->tx_buf_tick[3] = (uint8_t)(bid_price_q >> 8);
+    iface->tx_buf_tick[4] = (uint8_t)(bid_price_q & 0xFF);
+    
+    iface->tx_buf_tick[5] = (uint8_t)(bid_qty_q >> 24);
+    iface->tx_buf_tick[6] = (uint8_t)(bid_qty_q >> 16);
+    iface->tx_buf_tick[7] = (uint8_t)(bid_qty_q >> 8);
+    iface->tx_buf_tick[8] = (uint8_t)(bid_qty_q & 0xFF);
+    
+    iface->tx_buf_tick[9] = (uint8_t)(ask_price_q >> 24);
+    iface->tx_buf_tick[10] = (uint8_t)(ask_price_q >> 16);
+    iface->tx_buf_tick[11] = (uint8_t)(ask_price_q >> 8);
+    iface->tx_buf_tick[12] = (uint8_t)(ask_price_q & 0xFF);
+    
+    iface->tx_buf_tick[13] = (uint8_t)(ask_qty_q >> 24);
+    iface->tx_buf_tick[14] = (uint8_t)(ask_qty_q >> 16);
+    iface->tx_buf_tick[15] = (uint8_t)(ask_qty_q >> 8);
+    iface->tx_buf_tick[16] = (uint8_t)(ask_qty_q & 0xFF);
+
+    return spi_device_queue_trans(iface->dev, &iface->trans_tick, 0);
 }
 
 esp_err_t bnn_spi_rx_sync(bnn_spi_t *iface, bnn_decision_t *decision)
