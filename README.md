@@ -3,9 +3,9 @@
 ## Overview
 This repository contains the complete software, firmware, and RTL implementation of a hardware-accelerated Binary Neural Network (BNN) engineered for high-frequency trading (HFT). Designed to target resource-constrained silicon (the Renesas SLG47910V FPGA) paired with an ESP32-S3 microcontroller, the system pushes machine learning inference latency to the absolute theoretical limit of the fabric.
 
-In modern quantitative trading, sub-microsecond determinism is critical. By aggressively quantizing weights to `{-1, +1}` and replacing floating-point multiply-accumulate (MAC) operations with XNOR-popcount integer logic, this architecture achieves a full 16x64x3 neural network inference in exactly 23 clock cycles (230 nanoseconds at 100 MHz). 
+In modern quantitative trading, sub-microsecond determinism is critical. By aggressively quantizing weights to `{-1, +1}` and replacing floating-point multiply-accumulate (MAC) operations with XNOR-popcount integer logic, the FPGA core achieves a full 16x64x3 neural network inference in exactly 23 clock cycles (230 nanoseconds at 100 MHz).
 
-This implementation has been physically deployed, validated on silicon, and proven to operate deterministically through formal verification and end-to-end hardware co-simulation.
+> **Note on System Latency:** While the hardware inference itself is deterministic and sub-microsecond, the end-to-end "tick-to-trade" latency of this specific ESP32-S3 implementation is bounded by network stack overhead and FreeRTOS task scheduling jitter (typically 15–50 µs). This repository serves as a synthesizable, formally-verified RTL proof-of-concept. For true sub-microsecond trading, the `bnn_core` must be deployed on a PCIe-attached FPGA with Direct Market Access (DMA) MAC/PHY networking.
 
 ## Repository Structure
 
@@ -75,14 +75,18 @@ To process 64 hidden neurons without requiring 64 parallel popcount trees, the d
 #### Clock Domain Crossing (CDC)
 The SPI clock (up to 80 MHz) and the internal System Clock (100 MHz) are asynchronous. A traditional dual-flop synchronizer on the Chip Select line risks metastability if the SPI transaction finishes near a system clock edge. The design implements a closed-loop Toggle Synchronizer, ensuring the 16-bit payload is fully stable in a holding register before the internal FSM is triggered.
 
+#### Known Subtleties & Implementation Notes
+**BRAM Pipeline Eviction**: During the implementation of the VWAP (Volume Weighted Average Price) engine, which maintains a 20-tick sliding window using a synchronous BRAM ring buffer, a subtle pipeline bug was encountered and fixed. The BRAM Write Enable (`bram_we`) and address (`bram_addr`) signals must be driven combinationally from the current FSM state (`ST_CYCLE_1`). Using a standard non-blocking assignment (`bram_we <= 1'b1`) inside the state block delays the signal assertion until the clock edge transitioning *out* of `ST_CYCLE_1`. At that exact edge, the `write_ptr` increments. This causes the BRAM to write the new data to `ram[write_ptr + 1]` instead of `ram[write_ptr]`, catastrophically corrupting the ring buffer eviction logic by evicting the *current* tick on the next cycle rather than the 20-tick-old data. Combinational logic guarantees the BRAM samples the write strobe and address synchronously with the FSM state, correctly overwriting the oldest data before the pointer advances.
+
 ## Physical Implementation Results
 
 The bitstream was synthesized and deployed to a Renesas SLG47910V targeting a 100 MHz oscillator. 
 
 | Metric | Value | Detail |
 |--------|-------|--------|
-| **Core Execution Time** | 230 ns | Scope measured (23 cycles at 100 MHz) |
-| **End-to-End SPI Latency** | ~290 ns | Scope measured from CS_n low to DONE high |
+| **System Tick-to-Trade Latency** | ~15-50 µs | Dominated by ESP32 RTOS jitter & WiFi stack |
+| **FPGA Core Execution Time** | 230 ns | 23 cycles at 100 MHz target |
+| **FPGA SPI Transaction + Inference** | ~290 ns | Hardware time from CS_n low to DONE high |
 | **Total Parameters** | 1,216 bits | 152 bytes for a 16x64x3 architecture |
 | **BRAM Utilization** | 1.19 kbits | 3.7% of a standard 32kbit block |
 | **DSP Utilization** | 0 blocks | Pure XNOR-popcount integer logic |
