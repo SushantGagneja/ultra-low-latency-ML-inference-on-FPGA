@@ -31,7 +31,6 @@ module spi_slave (
     reg [7:0]   bit_count;
     reg [2:0]   tx_bit_count;
     reg [135:0] packet_sclk;
-    reg         packet_is_136_sclk;
     reg         packet_toggle_sclk;
 
     // CDC FIX: Latch bnn_decision into sys_clk domain on CS_n falling edge.
@@ -71,42 +70,38 @@ module spi_slave (
         end
     end
 
+    reg active;
     always @(posedge sclk or posedge cs_n or negedge rst_n) begin
         if (!rst_n) begin
-            shift_rx <= 136'd0;
-            bit_count <= 8'd0;
-            packet_sclk <= 136'd0;
-            packet_is_136_sclk <= 1'b0;
-            packet_toggle_sclk <= 1'b0;
+            active <= 1'b0;
         end else if (cs_n) begin
-            if (bit_count == 8'd24 || bit_count == 8'd136) begin
-                packet_sclk <= shift_rx;
-                packet_is_136_sclk <= (bit_count == 8'd136);
-                packet_toggle_sclk <= ~packet_toggle_sclk;
-            end
+            active <= 1'b0;
+        end else begin
+            active <= 1'b1;
+        end
+    end
+
+    always @(posedge sclk or negedge rst_n) begin
+        if (!rst_n) begin
             shift_rx <= 136'd0;
             bit_count <= 8'd0;
         end else begin
-            // Saturate bit_count at 136 to match the max protocol length
-            if (bit_count < 8'd136) begin
-                shift_rx <= {shift_rx[134:0], mosi};
-                bit_count <= bit_count + 1'b1;
+            if (!active) begin
+                shift_rx <= {135'd0, mosi};
+                bit_count <= 8'd1;
+            end else begin
+                if (bit_count < 8'd136) begin
+                    shift_rx <= {shift_rx[134:0], mosi};
+                    bit_count <= bit_count + 1'b1;
+                end
             end
         end
     end
     
-    // Clock Domain Crossing (CDC): completed 24-bit packet to sys_clk.
-    // packet_sclk is held stable until the next complete 24-bit command.
-    reg [2:0] packet_toggle_sync;
-    always @(posedge sys_clk or negedge rst_n) begin
-        if (!rst_n) begin
-            packet_toggle_sync <= 3'b000;
-        end else begin
-            packet_toggle_sync <= {packet_toggle_sync[1:0], packet_toggle_sclk};
-        end
-    end
-    
-    wire packet_ready = packet_toggle_sync[2] ^ packet_toggle_sync[1];
+    // Clock Domain Crossing (CDC): Sample on cs_n rising edge in sys_clk domain
+    wire cs_n_rising = (cs_n_sync_for_latch[2:1] == 2'b01);
+    reg packet_ready;
+    reg packet_is_136_sclk;
     
     always @(posedge sys_clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -122,6 +117,16 @@ module spi_slave (
             bnn_start <= 1'b0;
             bram_we <= 1'b0;
             tick_start <= 1'b0;
+            
+            if (cs_n_rising) begin
+                if (bit_count == 8'd24 || bit_count == 8'd136) begin
+                    packet_sclk <= shift_rx;
+                    packet_is_136_sclk <= (bit_count == 8'd136);
+                    packet_ready <= 1'b1;
+                end
+            end else begin
+                packet_ready <= 1'b0;
+            end
             
             if (packet_ready) begin
                 if (!packet_is_136_sclk) begin
