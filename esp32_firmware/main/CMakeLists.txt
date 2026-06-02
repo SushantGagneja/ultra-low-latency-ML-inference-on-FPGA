@@ -1,10 +1,8 @@
 idf_component_register(
     SRCS
         "main.c"
-        "quantization.c"
         "spi_interface.c"
-        "temporal_features.c"
-        "binance_ws.c"
+        "udp_server.c"
     INCLUDE_DIRS "."
-    REQUIRES driver esp_timer esp_netif esp_wifi esp_websocket_client json nvs_flash
+    REQUIRES driver esp_timer esp_netif esp_wifi nvs_flash lwip
 )
