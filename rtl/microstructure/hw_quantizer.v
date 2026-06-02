@@ -10,12 +10,13 @@ module hw_quantizer (
     input  wire        [33:0] vwap_q18_15,  // unsigned Q18.15
     input  wire        [31:0] midpoint,      // Q17.15, from tick_parser
     input  wire        [1:0]  lr_class,      // LR_BUYER/SELLER/NEUTRAL/UNDEF
+    input  wire        [1:0]  velocity,      // from tick_parser
     input  wire               ofi_valid,
     input  wire               vwap_valid,
     input  wire               lr_valid,
 
-    // Output (32-bit temporal memory: 4 ticks x 8 bits)
-    output reg  [31:0] spike_vector,
+    // Output (40-bit temporal memory: 4 ticks x 10 bits)
+    output reg  [39:0] spike_vector,
     output reg        spike_valid
 );
 
@@ -60,15 +61,15 @@ module hw_quantizer (
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            spike_vector <= 32'd0;
+            spike_vector <= 40'd0;
             spike_valid  <= 1'b0;
         end else begin
             spike_valid <= 1'b0;
             if (trigger_quantization) begin
-                // Shift existing memory left by 8 bits
-                spike_vector[31:8] <= spike_vector[23:0];
+                // Shift existing memory left by 10 bits
+                spike_vector[39:10] <= spike_vector[29:0];
                 
-                // Inject current tick features into the lowest 8 bits
+                // Inject current tick features into the lowest 10 bits
                 spike_vector[0] <= (ofi_q16_16 > 32'sd327680);
                 spike_vector[1] <= (ofi_q16_16 > 32'sd0);
                 spike_vector[2] <= (ofi_q16_16 < -32'sd327680);
@@ -77,6 +78,8 @@ module hw_quantizer (
                 spike_vector[5] <= (midpoint_ext2 < vwap_q18_15);
                 spike_vector[6] <= (lr_class == 2'b01);
                 spike_vector[7] <= (lr_class == 2'b10);
+                spike_vector[8] <= velocity[0];
+                spike_vector[9] <= velocity[1];
                 
                 spike_valid <= 1'b1;
             end
