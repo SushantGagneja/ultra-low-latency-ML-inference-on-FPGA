@@ -15,8 +15,10 @@ module bnn_top (
 );
 
     // Interconnects
-    wire        bnn_start;
-    wire [15:0] bnn_spike_vector;
+    wire        bnn_start_legacy;
+    wire [15:0] bnn_spike_legacy;
+    
+    // Legacy SPI paths
     wire        bram_we;
     wire [7:0]  bram_waddr;
     wire [7:0]  bram_wdata;
@@ -27,6 +29,10 @@ module bnn_top (
     wire [4:0]  bram_raddr;
     wire [63:0] bram_rdata;
 
+    // Microstructure Pipeline Wires
+    wire        tick_start;
+    wire [127:0] tick_payload;
+
     // SPI Slave
     spi_slave u_spi_slave (
         .rst_n(rst_n),
@@ -36,15 +42,122 @@ module bnn_top (
         .miso(spi_miso),
         
         .sys_clk(sys_clk),
-        .bnn_start(bnn_start),
-        .bnn_spike_vector(bnn_spike_vector),
+        .bnn_start(bnn_start_legacy),
+        .bnn_spike_vector(bnn_spike_legacy),
         
         .bram_we(bram_we),
         .bram_waddr(bram_waddr),
         .bram_wdata(bram_wdata),
         
-        .bnn_decision(bnn_decision)
+        .bnn_decision(bnn_decision),
+        
+        // Microstructure outputs
+        .tick_start(tick_start),
+        .tick_payload(tick_payload)
     );
+    
+    wire tick_valid;
+    wire [31:0] bid_price_q;
+    wire [31:0] ask_price_q;
+    wire [31:0] bid_qty_q;
+    wire [31:0] ask_qty_q;
+    
+    wire ofi_valid;
+    wire [31:0] ofi_q;
+    
+    wire vwap_valid;
+    wire [33:0] vwap_q;
+    
+    wire lr_valid;
+    wire [1:0] lr_class;
+    
+    wire spike_valid;
+    wire [15:0] spike_vector;
+
+    // 1. Tick Parser
+    tick_parser u_parser (
+        .clk(sys_clk),
+        .rst_n(rst_n),
+        .tick_start(tick_start),
+        .tick_payload(tick_payload),
+        .tick_valid(tick_valid),
+        .bid_price_q17_15(bid_price_q),
+        .ask_price_q17_15(ask_price_q),
+        .bid_qty_q16_16(bid_qty_q),
+        .ask_qty_q16_16(ask_qty_q)
+    );
+
+    // 2. Lee-Ready
+    lee_ready u_lr (
+        .clk(sys_clk),
+        .rst_n(rst_n),
+        .tick_valid(tick_valid),
+        .bid_price_q17_15(bid_price_q),
+        .ask_price_q17_15(ask_price_q),
+        .lr_valid(lr_valid),
+        .lr_class(lr_class)
+    );
+    
+    // 3. OFI Engine
+    ofi_engine u_ofi (
+        .clk(sys_clk),
+        .rst_n(rst_n),
+        .tick_valid(tick_valid),
+        .bid_price_q17_15(bid_price_q),
+        .ask_price_q17_15(ask_price_q),
+        .bid_qty_q16_16(bid_qty_q),
+        .ask_qty_q16_16(ask_qty_q),
+        .ofi_valid(ofi_valid),
+        .ofi_q16_16(ofi_q)
+    );
+    
+    // 4. VWAP Engine
+    vwap_engine u_vwap (
+        .clk(sys_clk),
+        .rst_n(rst_n),
+        .tick_valid(tick_valid),
+        .bid_price_q17_15(bid_price_q),
+        .ask_price_q17_15(ask_price_q),
+        .bid_qty_q16_16(bid_qty_q),
+        .ask_qty_q16_16(ask_qty_q),
+        .vwap_valid(vwap_valid),
+        .vwap_q18_15(vwap_q),
+        .vwap_busy() // left unconnected intentionally
+    );
+
+    wire [31:0] midpoint = (bid_price_q + ask_price_q) >> 1;
+
+    // 5. Hardware Quantizer
+    hw_quantizer u_quantizer (
+        .clk(sys_clk),
+        .rst_n(rst_n),
+        .tick_valid(tick_valid),
+        .ofi_q16_16(ofi_q),
+        .vwap_q18_15(vwap_q),
+        .midpoint(midpoint),
+        .lr_class(lr_class),
+        .ofi_valid(ofi_valid),
+        .vwap_valid(vwap_valid),
+        .lr_valid(lr_valid),
+        .spike_vector(spike_vector),
+        .spike_valid(spike_valid)
+    );
+
+    // Arbitration Logic
+    wire bnn_start = bnn_start_legacy | spike_valid;
+    wire [15:0] bnn_spike_vector = bnn_start_legacy ? bnn_spike_legacy : spike_vector;
+
+`ifdef FORMAL
+    // Formal verification: Arbitration Mutual Exclusion
+    // Ensures that the legacy 0x01 SPI path and the 0x10 microstructure path
+    // never attempt to trigger the BNN inference simultaneously.
+    initial assume(!rst_n);
+    always @(posedge sys_clk) begin
+        if (rst_n && $past(rst_n)) begin
+            assert (!(bnn_start_legacy & spike_valid));
+        end
+    end
+`endif
 
     // BRAM Weights
     bram_weights u_bram_weights (
@@ -67,6 +180,9 @@ module bnn_top (
         
         // SPI Control
         .start(bnn_start),
+        // NOTE: The `spike_vector` input is read continuously during STATE_LAYER1 (16 cycles).
+        // Therefore, `bnn_spike_vector` MUST be held stable for the full 23-cycle duration.
+        // hw_quantizer guarantees stability between ticks by registering `spike_vector`.
         .spike_vector(bnn_spike_vector),
         .done(bnn_done),
         .decision(bnn_decision),
