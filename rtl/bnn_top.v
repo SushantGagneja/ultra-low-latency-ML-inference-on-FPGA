@@ -25,9 +25,6 @@ module bnn_top (
     
     wire [1:0]  bnn_decision;
     wire        bnn_done;
-    
-    wire [4:0]  bram_raddr;
-    wire [63:0] bram_rdata;
 
     // Microstructure Pipeline Wires
     wire        tick_start;
@@ -72,7 +69,7 @@ module bnn_top (
     wire [1:0] lr_class;
     
     wire spike_valid;
-    wire [15:0] spike_vector;
+    wire [7:0] spike_vector;
 
     // 1. Tick Parser
     tick_parser u_parser (
@@ -159,37 +156,14 @@ module bnn_top (
     end
 `endif
 
-    // BRAM Weights
-    bram_weights u_bram_weights (
-        .clk(sys_clk),
-        
-        // Write port (from SPI)
-        .we(bram_we),
-        .waddr(bram_waddr),
-        .wdata(bram_wdata),
-        
-        // Read port (to BNN Core)
-        .raddr(bram_raddr),
-        .rdata(bram_rdata)
-    );
-
-    // BNN Core
-    bnn_core u_bnn_core (
+    // Unrolled BNN Core
+    bnn_core_unrolled u_bnn_core (
         .clk(sys_clk),
         .rst_n(rst_n),
-        
-        // SPI Control
         .start(bnn_start),
-        // NOTE: The `spike_vector` input is read continuously during STATE_LAYER1 (16 cycles).
-        // Therefore, `bnn_spike_vector` MUST be held stable for the full 23-cycle duration.
-        // hw_quantizer guarantees stability between ticks by registering `spike_vector`.
-        .spike_vector(bnn_spike_vector),
+        .spike_vector(bnn_spike_vector[7:0]), // Only pass the active 8 bits
         .done(bnn_done),
-        .decision(bnn_decision),
-        
-        // BRAM Interface
-        .bram_raddr(bram_raddr),
-        .bram_rdata(bram_rdata)
+        .decision(bnn_decision)
     );
 
     // Route done signal to external pin
