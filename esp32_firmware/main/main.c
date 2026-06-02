@@ -168,7 +168,7 @@ void app_main(void)
             uint32_t bid_q = (uint32_t)(tick.bid_qty * 65536.0f);
             uint32_t ask_q = (uint32_t)(tick.ask_qty * 65536.0f);
             
-            err = bnn_spi_tx_tick(&fpga, bid_p, bid_q, ask_p, ask_q);
+            err = bnn_spi_tx_tick(&fpga, bid_p, bid_q, ask_p, ask_q, tick.metadata);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to queue SPI DMA TX: %s", esp_err_to_name(err));
                 inference_context_t discard;
