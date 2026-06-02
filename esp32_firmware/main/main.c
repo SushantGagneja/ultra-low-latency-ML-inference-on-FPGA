@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_cpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -29,9 +30,7 @@ enum {
 };
 
 typedef struct {
-    uint16_t spike;
-    int64_t start_time;
-    bnn_indicators_t indicators;
+    uint32_t start_cycles;
     float price;
 } inference_context_t;
 
@@ -67,41 +66,26 @@ static void fpga_result_task(void *arg)
 
             bnn_decision_t decision = BNN_DECISION_INVALID;
             esp_err_t err = bnn_spi_rx_sync(&fpga, &decision);
-            int64_t end_time = esp_timer_get_time();
-
-            // FIX (latency measurement documentation):
-            // esp_timer_get_time() returns microseconds.
-            // (end_time - ctx.start_time) is the delta in µs.
-            // Multiplying by 1000 converts µs → ns, which is correct.
-            // HOWEVER: this measures END-TO-END wall-clock latency including:
-            //   - SPI TX DMA setup + 24-bit transfer at 80 MHz (~300 ns)
-            //   - FPGA BNN inference (~230 ns at 100 MHz, 23 cycles)
-            //   - DONE interrupt propagation + FreeRTOS task wake-up
-            //   - SPI RX transaction to read decision
-            // This is NOT the raw FPGA inference time (which is ~230 ns).
-            // Typical values will be in the tens-of-microseconds range.
-            int64_t latency_ns = (end_time - ctx.start_time) * 1000;
+            // esp_cpu_get_cycle_count() returns the CCOUNT register (240MHz).
+            // 1 cycle = 4.166 ns.
+            uint32_t end_cycles = esp_cpu_get_cycle_count();
+            uint32_t cycle_delta = end_cycles - ctx.start_cycles;
+            int64_t latency_ns = (int64_t)cycle_delta * 1000 / 240; // Convert to ns
 
             if (err == ESP_OK) {
                 ESP_LOGI(TAG,
                          "{\"type\":\"bnn_inference\",\"timestamp_us\":%" PRId64
-                         ",\"spike\":\"0x%04x\",\"decision\":%u,\"latency_ns\":%" PRId64
-                         ",\"rsi\":%.2f,\"momentum\":%.6f,\"volatility\":%.6f,\"price\":%.2f"
-                         ",\"status\":\"SUCCESS\",\"note\":\"wall_clock_e2e\"}",
+                         ",\"decision\":%u,\"latency_ns\":%" PRId64
+                         ",\"price\":%.2f,\"status\":\"SUCCESS\",\"note\":\"T2T_hardware_latency\"}",
                          esp_timer_get_time(),
-                         ctx.spike,
                          (unsigned)decision,
                          latency_ns,
-                         ctx.indicators.rsi,
-                         ctx.indicators.momentum,
-                         ctx.indicators.volatility,
                          ctx.price);
             } else {
                 ESP_LOGW(TAG,
                          "{\"type\":\"bnn_inference\",\"timestamp_us\":%" PRId64
-                         ",\"spike\":\"0x%04x\",\"decision\":3,\"latency_ns\":0,\"status\":\"%s\"}",
+                         ",\"decision\":3,\"latency_ns\":0,\"status\":\"%s\"}",
                          esp_timer_get_time(),
-                         ctx.spike,
                          esp_err_to_name(err));
             }
         }
@@ -110,9 +94,6 @@ static void fpga_result_task(void *arg)
 
 void app_main(void)
 {
-    bnn_feature_state_t feature_state;
-    bnn_quantizer_t quantizer;
-
     // Initialize NVS (required for WiFi)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -120,9 +101,6 @@ void app_main(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-
-    bnn_feature_state_init(&feature_state);
-    bnn_quantizer_init(&quantizer);
 
     const bnn_spi_config_t spi_cfg = {
         .host = SPI2_HOST,
@@ -180,31 +158,24 @@ void app_main(void)
             continue;
         }
 
-        if (!bnn_feature_update(&feature_state, &tick, &ctx.indicators)) {
-            continue;
-        }
-
-        ctx.spike = bnn_quantize_bipolar(&quantizer, &ctx.indicators);
-        ctx.start_time = esp_timer_get_time();
-        ctx.price = ctx.indicators.price;
+        ctx.start_cycles = esp_cpu_get_cycle_count();
+        ctx.price = tick.bid_price; // Approximate for logging
 
         // Push context to result task BEFORE initiating hardware DMA.
-        // The context is consumed by fpga_result_task after DONE fires.
         if (xQueueSend(ctx_queue, &ctx, 0) == pdTRUE) {
-            // Initiate Zero-Copy DMA SPI TX (Non-blocking)
-            err = bnn_spi_tx_async(&fpga, ctx.spike, 0u);
+            // Initiate Zero-Copy DMA SPI TX (Non-blocking) sending raw tick
+            // Format to Q format used by the tick parser
+            uint32_t bid_p = (uint32_t)(tick.bid_price * 32768.0f);
+            uint32_t ask_p = (uint32_t)(tick.ask_price * 32768.0f);
+            uint32_t bid_q = (uint32_t)(tick.bid_qty * 65536.0f);
+            uint32_t ask_q = (uint32_t)(tick.ask_qty * 65536.0f);
+            
+            err = bnn_spi_tx_tick(&fpga, bid_p, bid_q, ask_p, ask_q);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to queue SPI DMA TX: %s", esp_err_to_name(err));
-                // FIX (ctx_queue race): If TX fails, the context is stuck in
-                // ctx_queue with no corresponding DONE interrupt coming.
-                // The result task would dequeue this stale context on the NEXT
-                // unrelated DONE, pairing it with the wrong inference result.
-                // Pop it back out to keep the queue consistent.
                 inference_context_t discard;
                 xQueueReceive(ctx_queue, &discard, 0);
             }
-            // Loop immediately without waiting for inference to finish!
-            // Achieves concurrent execution of Xtensa Core parsing next tick while FPGA computes.
         } else {
             ESP_LOGW(TAG, "Context queue full, dropping inference request");
         }
