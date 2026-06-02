@@ -29,23 +29,25 @@ The trading pipeline is distributed across three tightly-coupled domains: Model 
 
 ### Hardware/Software Co-Design Strategy
 
-#### ESP32-S3 Market Ingestion and Concurrency
-The firmware is engineered to operate in the hot path with strict deterministic bounds. It connects directly to the Binance `bookTicker` stream over TLS.
+#### ESP32-S3 Network Ingestion (Phase 2)
+In the original Phase 1 architecture, the ESP32 handled feature extraction (RSI, Momentum) in firmware. In the new Phase 2/3 architecture, the ESP32 is strictly relegated to a networking bridge, eliminating RTOS jitter from the computational path.
 
-*   **Zero-Copy SPI DMA Concurrency:** To achieve true pipeline concurrency, the firmware is split into two FreeRTOS tasks. The Ingestion Task quantizes the tick and fires an asynchronous, non-blocking DMA SPI transaction (`spi_device_queue_trans`). The Xtensa core immediately begins processing the *next* tick while the FPGA computes the current tick. A hardware interrupt on the `DONE` pin wakes the Result Task to harvest the decision, completely decoupling CPU execution from inference latency.
-*   **O(1) Feature Extraction:** To prevent latency spikes associated with garbage collection or heap fragmentation, the market state is maintained using pre-allocated ring buffers. Features (RSI, Momentum, Volatility) are updated in O(1) algorithmic time upon receiving a new tick.
-*   **Bipolar Quantization:** Floating-point indicators are passed through a static quantization matrix. Thresholds are calibrated during the Python training phase and hardcoded into the C firmware. The output is a deterministic 16-bit "spike vector".
+*   **Zero-Copy SPI DMA:** The firmware connects to the Binance `bookTicker` stream over TLS, parses the JSON payload, and formats it into a raw 128-bit tick (Bid/Ask Prices and Quantities). It immediately fires a non-blocking 136-bit DMA SPI transaction to stream the raw tick straight into the FPGA logic.
+*   **Decoupled Execution:** The Xtensa core immediately begins network ingestion for the *next* tick while the FPGA handles all feature extraction and inference. A hardware interrupt on the `DONE` pin wakes the ESP32 Result Task to harvest the decision, completely decoupling CPU execution from inference latency.
 
-#### FPGA Hardware Inference
-The `bnn_core.v` module executes the inference completely independently of the ESP32.
+#### FPGA Hardware Microstructure & Inference (Phase 2)
+The `bnn_top.v` module acts as a complete HFT subsystem, executing everything from feature extraction to inference independently of the ESP32.
 
+*   **Hardware Feature Engines:** The FPGA pipeline includes dedicated hardware engines for microstructural analysis:
+    *   **OFI Engine:** Computes Order Flow Imbalance (OFI) on a tick-by-tick basis using strict Q16.16 signed arithmetic.
+    *   **VWAP Engine:** Maintains a 20-tick sliding window Volume Weighted Average Price using an ultra-low-latency Restoring Divider and a synchronous BRAM ring buffer.
+    *   **Lee-Ready Engine:** Classifies tick aggression (Buyer/Seller/Neutral) in a single cycle.
+*   **Hardware Quantization:** The pipeline synchronously captures the outputs of all three feature engines and dynamically maps them to the 16-bit bipolar "spike vector" required by the BNN. 
 *   **XNOR-Popcount Logic:** Floating-point Multiply-Accumulate (MAC) operations are entirely replaced by binary XNOR and popcount adder trees.
-*   **Zero Batch Normalization:** Traditional BNNs rely heavily on BatchNorm to recenter distributions after binarization. In this architecture, BatchNorm is completely omitted because the output layer is a strict threshold-based classifier, making continuous distribution recentering redundant. This saves hundreds of LUTs and precious cycle latency.
-*   **O(1) Inference:** The network always consumes exactly 23 clock cycles. There is no data-dependent latency.
-*   **100 MHz Timing Closure:** Synthesis and Place & Route on the Renesas SLG47910V (ForgeFPGA) achieves a maximum routed frequency (Fmax) of 112.48 MHz. The critical path (BRAM -> XNOR -> 4-stage Adder Tree -> DFF) closes timing with a Setup WNS of 1.110 ns at the target 100 MHz clock.
+*   **100 MHz Timing Closure:** Synthesis and Place & Route on the Renesas SLG47910V achieves timing closure at 100 MHz by utilizing a deeply pipelined, time-multiplexed design, yielding a Setup WNS > 0.5 ns across all critical paths.
 
 ### RTL Microarchitecture
-The FPGA core avoids DSP slices entirely. The 16-input, 64-hidden, 3-output topology is computed using spatial folding and time-multiplexing to minimize logic element (LE) utilization while strictly meeting the sub-300ns latency SLA.
+The FPGA core avoids DSP slices entirely. The architecture handles complex calculations like Q18.15 division by heavily pipelining the datapath, keeping the system deeply deterministc.
 
 #### XNOR-Popcount Logic
 In a BNN, weights and activations are strictly binary. The traditional arithmetic `y = sum(w * x)` is replaced by the highly efficient hardware equivalent:
@@ -157,11 +159,10 @@ The following confusion matrix is evaluated on 1,800 out-of-sample ticks. **Note
 
 A critical requirement of this project was absolute assurance of mathematical equivalence and hardware robustness before physical validation.
 
-1.  **C/Python Feature Equivalence:** The ESP32 `temporal_features.c` and `quantization.c` are compiled locally and streamed with 100,000 realistic market ticks against the Python `retrain_bookticker.py` extractor. We assert that float drift between x86 and Xtensa FPUs is within `1e-4` (machine epsilon), and that the resulting 16-bit binary quantized spike is **100% bit-exact identical** between Python and C.
-2.  **Formal Verification (SymbiYosys SVA):** The `bnn_core` state machine is formally verified using SystemVerilog Assertions (SVA) via SymbiYosys (see `formal.sby`). The proofs guarantee bounded execution (no deadlocks), strict 23-cycle completion, and correct boolean logic implementation of the CDC protocol.
+1.  **Bit-Exact Co-Simulation:** We built an automated verification harness (`microstructure_cosim.py` and `microstructure_cosim_tb.v`). This harness parses 1,000 raw Binance ticks, passes them through the Python golden model and the Icarus Verilog simulation concurrently, and asserts exact structural and bit-level equivalence across every feature engine (OFI, VWAP, Lee-Ready). **The co-simulation passed with zero mismatches.**
+2.  **Formal Verification (SymbiYosys SVA):** The pipeline arbitration is formally verified using SystemVerilog Assertions (SVA) via SymbiYosys and the Yices SMT solver. The proofs guarantee mutual exclusion across the SPI dual-path routing, asserting that legacy 0x01 inference streams and 0x10 microstructure streams can never fatally collide.
 3.  **Adversarial RTL Testbench:** The Icarus Verilog testbench injects hardware faults, asserting that the FSM does not lock up when `CS_n` deasserts mid-transfer, when the SPI clock stops unexpectedly mid-byte, or when spurious `start` strobes fire.
 4.  **Hardware-Accurate Python Simulation:** A standalone XNOR-popcount simulator in Python verifies that replacing floating-point math with binary logic yields identical classification boundaries.
-5.  **End-to-End Co-Simulation:** A Python test harness (`cosim.py`) drives Icarus Verilog (`vvp`) via subprocesses. It streams 500 market ticks through the software quantizer, injects the vectors into the Verilog simulation, reads the RTL output, and asserts a 100% bit-exact match with the golden model.
 
 ## System Infrastructure
 
