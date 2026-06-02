@@ -2,12 +2,12 @@ import numpy as np
 from pathlib import Path
 import math
 
-def generate_bnn_rtl(w1, w2, b1, b2, output_file="rtl/bnn_core_unrolled.v"):
+def generate_bnn_rtl(w1, w2, b1_A, b2_A, b1_B, b2_B, output_file="rtl/bnn_core_unrolled.v"):
     """
-    w1: shape (32, 32) - 32 hidden neurons, 32 inputs. Values in {-1, 0, 1}
+    w1: shape (32, 40) - 32 hidden neurons, 40 inputs. Values in {-1, 0, 1}
     w2: shape (3, 32) - 3 output neurons, 32 inputs. Values in {-1, 0, 1}
-    b1: shape (32,) - bias for hidden layer
-    b2: shape (3,) - bias for output layer
+    b1_A/B: shape (32,) - bias for hidden layer
+    b2_A/B: shape (3,) - bias for output layer
     """
     num_inputs = w1.shape[1]
     num_hidden = w1.shape[0]
@@ -19,7 +19,8 @@ def generate_bnn_rtl(w1, w2, b1, b2, output_file="rtl/bnn_core_unrolled.v"):
         f.write("    input  wire        clk,\n")
         f.write("    input  wire        rst_n,\n")
         f.write("    input  wire        start,\n")
-        f.write("    input  wire [31:0] spike_vector,\n")
+        f.write("    input  wire [39:0] spike_vector,\n")
+        f.write("    input  wire        regime_select,\n")
         f.write("    output reg         done,\n")
         f.write("    output reg  [1:0]  decision\n")
         f.write(");\n\n")
@@ -28,7 +29,7 @@ def generate_bnn_rtl(w1, w2, b1, b2, output_file="rtl/bnn_core_unrolled.v"):
         # Clock 1: Calculate hidden layer and store in register.
         # Clock 2: Calculate output layer and raise done.
         
-        f.write("    // --- LAYER 1: 8 Inputs -> 32 Hidden (Combinatorial) ---\n")
+        f.write("    // --- LAYER 1: 40 Inputs -> 32 Hidden (Combinatorial) ---\n")
         
         for j in range(num_hidden):
             terms = []
@@ -44,12 +45,13 @@ def generate_bnn_rtl(w1, w2, b1, b2, output_file="rtl/bnn_core_unrolled.v"):
             if num_nonzero == 0:
                 f.write(f"    wire hidden_comb_{j} = 1'b0; // Pruned\n")
             else:
-                threshold = math.ceil((num_nonzero - b1[j]) / 2.0)
+                threshold_A = math.ceil((num_nonzero - b1_A[j]) / 2.0)
+                threshold_B = math.ceil((num_nonzero - b1_B[j]) / 2.0)
                 bit_width = max(1, math.ceil(math.log2(num_nonzero + 1)))
                 
                 sum_expr = " + ".join(terms)
                 f.write(f"    wire [{bit_width-1}:0] sum_h_{j} = {sum_expr};\n")
-                f.write(f"    wire hidden_comb_{j} = (sum_h_{j} >= $signed({threshold})) ? 1'b1 : 1'b0;\n")
+                f.write(f"    wire hidden_comb_{j} = (sum_h_{j} >= (regime_select ? $signed({threshold_A}) : $signed({threshold_B}))) ? 1'b1 : 1'b0;\n")
                 
         f.write("\n    // --- PIPELINE REGISTER ---\n")
         f.write(f"    reg [{num_hidden-1}:0] hidden_reg;\n")
@@ -85,12 +87,13 @@ def generate_bnn_rtl(w1, w2, b1, b2, output_file="rtl/bnn_core_unrolled.v"):
             if num_nonzero == 0:
                 f.write(f"    wire out_comb_{j} = 1'b0; // Pruned\n")
             else:
-                threshold = math.ceil((num_nonzero - b2[j]) / 2.0)
+                threshold_A = math.ceil((num_nonzero - b2_A[j]) / 2.0)
+                threshold_B = math.ceil((num_nonzero - b2_B[j]) / 2.0)
                 bit_width = max(1, math.ceil(math.log2(num_nonzero + 1)))
                 
                 sum_expr = " + ".join(terms)
                 f.write(f"    wire [{bit_width-1}:0] sum_o_{j} = {sum_expr};\n")
-                f.write(f"    wire out_comb_{j} = (sum_o_{j} >= $signed({threshold})) ? 1'b1 : 1'b0;\n")
+                f.write(f"    wire out_comb_{j} = (sum_o_{j} >= (regime_select ? $signed({threshold_A}) : $signed({threshold_B}))) ? 1'b1 : 1'b0;\n")
                 
         f.write("\n    // --- FINAL OUTPUT REGISTER ---\n")
         f.write("    always @(posedge clk or negedge rst_n) begin\n")
@@ -124,12 +127,14 @@ if __name__ == "__main__":
     data = np.load(weights_path)
     w1 = data['w1']
     w2 = data['w2']
-    b1 = data['b1']
-    b2 = data['b2']
+    b1_A = data['b1_A']
+    b2_A = data['b2_A']
+    b1_B = data['b1_B']
+    b2_B = data['b2_B']
     
     print(f"Loaded Layer 1 Weights: {w1.shape}, non-zero: {np.count_nonzero(w1)}")
     print(f"Loaded Layer 2 Weights: {w2.shape}, non-zero: {np.count_nonzero(w2)}")
     
     output_file = Path("rtl/bnn_core_unrolled.v")
-    generate_bnn_rtl(w1, w2, b1, b2, str(output_file))
+    generate_bnn_rtl(w1, w2, b1_A, b2_A, b1_B, b2_B, str(output_file))
     print(f"Generated fully unrolled sparse BNN RTL at {output_file}")
