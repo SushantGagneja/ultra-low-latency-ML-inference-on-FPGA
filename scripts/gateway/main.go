@@ -10,15 +10,17 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// Raw Tick Packet: 16 bytes total
+// Raw Tick Packet: 17 bytes total
 // [0:4]   Bid Price (float32, little-endian)
 // [4:8]   Ask Price (float32, little-endian)
 // [8:12]  Bid Qty (float32, little-endian)
 // [12:16] Ask Qty (float32, little-endian)
+// [16]    Metadata: [7:3] Reserved, [2] Regime, [1:0] Velocity
 
 func main() {
 	espIP := flag.String("ip", "192.168.1.100:8080", "ESP32 UDP IP and Port")
@@ -59,9 +61,11 @@ func main() {
 
 	// Reusable binary buffer to avoid allocations in the hot path
 	binBuf := new(bytes.Buffer)
-	binBuf.Grow(16)
+	binBuf.Grow(17)
 
 	log.Println("Listening for market ticks...")
+	
+	var lastTickTime time.Time
 
 	// 3. Hot Path Processing Loop
 	for {
@@ -84,7 +88,35 @@ func main() {
 			continue // Drop malformed ticks
 		}
 
-		// Pack into tight 16-byte binary payload
+		// Calculate Time-Delta (velocity) and Regime
+		now := time.Now()
+		var velocity uint8 = 0
+		if !lastTickTime.IsZero() {
+			dt := now.Sub(lastTickTime).Milliseconds()
+			if dt < 10 {
+				velocity = 3 // Very fast
+			} else if dt < 50 {
+				velocity = 2 // Fast
+			} else if dt < 200 {
+				velocity = 1 // Normal
+			} else {
+				velocity = 0 // Slow
+			}
+		}
+		lastTickTime = now
+
+		// Simulate Regime based on a simple 20-second alternating cycle
+		// In production, this would track macro order flow volatility
+		var regimeSelect uint8 = 0
+		if now.Second()%20 < 10 {
+			regimeSelect = 1 // Model A (Momentum)
+		} else {
+			regimeSelect = 0 // Model B (Ranging)
+		}
+
+		metadata := (regimeSelect << 2) | (velocity & 0x03)
+
+		// Pack into tight 17-byte binary payload
 		binBuf.Reset()
 		
 		// Note: The ESP32 Xtensa architecture is Little-Endian.
@@ -93,6 +125,7 @@ func main() {
 		binary.Write(binBuf, binary.LittleEndian, float32(askPrice))
 		binary.Write(binBuf, binary.LittleEndian, float32(bidQty))
 		binary.Write(binBuf, binary.LittleEndian, float32(askQty))
+		binBuf.WriteByte(metadata)
 
 		// Fire UDP packet
 		_, err = conn.Write(binBuf.Bytes())
