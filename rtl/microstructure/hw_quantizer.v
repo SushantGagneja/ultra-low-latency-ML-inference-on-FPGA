@@ -66,7 +66,12 @@ module hw_quantizer (
         end else begin
             spike_valid <= 1'b0;
             if (trigger_quantization) begin
-                // Shift existing memory left by 10 bits
+                // Shift existing memory left by 10 bits.
+                // Temporal Ordering:
+                // [9:0]   = t_0 (Newest tick)
+                // [19:10] = t_{-1}
+                // [29:20] = t_{-2}
+                // [39:30] = t_{-3} (Oldest tick)
                 spike_vector[39:10] <= spike_vector[29:0];
                 
                 // Inject current tick features into the lowest 10 bits
