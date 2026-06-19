@@ -23,7 +23,7 @@ module ofi_engine (
     reg [31:0] prev_ask_qty;
     reg        is_first_tick;
 
-    reg [31:0] term1_v, term2_v, term3_v, term4_v;
+    reg signed [31:0] term1_v, term2_v, term3_v, term4_v;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
