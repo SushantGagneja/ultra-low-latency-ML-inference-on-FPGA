@@ -9,6 +9,7 @@ from pathlib import Path
 class TernarySTE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, threshold=0.05):
+        ctx.save_for_backward(input)
         out = torch.zeros_like(input)
         out[input > threshold] = 1.0
         out[input < -threshold] = -1.0
@@ -16,7 +17,8 @@ class TernarySTE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output, None
+        input, = ctx.saved_tensors
+        return grad_output * (input.abs() <= 1.0).float(), None
 
 def ternary_quantize(x, threshold=0.05):
     return TernarySTE.apply(x, threshold)
@@ -132,16 +134,18 @@ def generate_synthetic_data(regime='momentum', n_samples=12000, k=5):
         # We fill 4 ticks backward. For synthesis, we'll just populate them logically.
         for t in range(4):
             spike = np.full(10, -1.0, dtype=np.float32)
+            # Probabilistic feature assignment to make the task harder
+            # This prevents the BNN from collapsing into a 2-input OR gate
             if label == 1.0: 
-                spike[1] = 1.0 # OFI > 0
-                if np.random.rand() > 0.5: spike[0] = 1.0
-                spike[4] = 1.0 # Mid > VWAP
-                spike[6] = 1.0 # Lee-Ready BUYER
+                if np.random.rand() > 0.3: spike[1] = 1.0 # OFI > 0
+                if np.random.rand() > 0.7: spike[0] = 1.0
+                if np.random.rand() > 0.4: spike[4] = 1.0 # Mid > VWAP
+                if np.random.rand() > 0.3: spike[6] = 1.0 # Lee-Ready BUYER
             elif label == 0.0:
-                spike[3] = 1.0 # OFI < 0
-                if np.random.rand() > 0.5: spike[2] = 1.0
-                spike[5] = 1.0 # Mid < VWAP
-                spike[7] = 1.0 # Lee-Ready SELLER
+                if np.random.rand() > 0.3: spike[3] = 1.0 # OFI < 0
+                if np.random.rand() > 0.7: spike[2] = 1.0
+                if np.random.rand() > 0.4: spike[5] = 1.0 # Mid < VWAP
+                if np.random.rand() > 0.3: spike[7] = 1.0 # Lee-Ready SELLER
                 
             # Velocity Bits [8, 9]
             # 00 = slow, 01 = norm, 10 = fast, 11 = very fast
