@@ -4,8 +4,8 @@ module tick_parser (
     input  wire         clk,
     input  wire         rst_n,
     
-    // Interface from SPI Slave
     input  wire         tick_start,
+    input  wire         vwap_busy,
     input  wire [127:0] tick_payload,
     input  wire [7:0]   tick_metadata,
     
@@ -29,11 +29,11 @@ module tick_parser (
             velocity         <= 2'd0;
             regime_select    <= 1'b0;
         end else begin
-            // 1-cycle strobe
-            tick_valid <= tick_start;
+            // 1-cycle strobe, only valid if VWAP engine is ready
+            tick_valid <= tick_start & ~vwap_busy;
             
-            if (tick_start) begin
-                // Decode 128-bit payload
+            if (tick_start && !vwap_busy) begin
+                // Update latched state only if pipeline is ready 128-bit payload
                 // [127:96]  Bid Price
                 // [95:64]   Bid Qty
                 // [63:32]   Ask Price
