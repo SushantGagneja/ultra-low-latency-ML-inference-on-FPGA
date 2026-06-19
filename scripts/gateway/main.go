@@ -63,7 +63,11 @@ func main() {
 	binBuf := new(bytes.Buffer)
 	binBuf.Grow(17)
 
-	log.Println("Listening for market ticks...")
+	log.Printf("Listening for real-time market data...")
+	
+	// Real-time regime detection variables
+	var emaTickDt float64 = 100.0 // Starting assumption: 100ms per tick
+	const alpha float64 = 0.02    // EMA smoothing factor
 	
 	var lastTickTime time.Time
 
@@ -105,10 +109,15 @@ func main() {
 		}
 		lastTickTime = now
 
-		// Simulate Regime based on a simple 20-second alternating cycle
-		// In production, this would track macro order flow volatility
+		// Update EMA of time delta to determine market regime (Volatility proxy)
+		if dt > 0 {
+			emaTickDt = (alpha * float64(dt)) + ((1.0 - alpha) * emaTickDt)
+		}
+		
+		// Real Regime Detection based on Tick Rate
+		// If ticks are arriving fast (EMA < 40ms), we are in Momentum. Otherwise, Ranging.
 		var regimeSelect uint8 = 0
-		if now.Second()%20 < 10 {
+		if emaTickDt < 40.0 {
 			regimeSelect = 1 // Model A (Momentum)
 		} else {
 			regimeSelect = 0 // Model B (Ranging)
