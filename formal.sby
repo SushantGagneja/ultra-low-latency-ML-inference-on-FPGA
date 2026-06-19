@@ -1,6 +1,5 @@
 [options]
-mode bmc
-depth 30
+mode prove
 expect pass
 
 [engines]
