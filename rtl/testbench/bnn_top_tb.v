@@ -33,13 +33,14 @@ module bnn_top_tb;
     
     task send_spi_tick;
         input [127:0] payload;
+        input [7:0] metadata;
         integer i;
-        reg [135:0] frame;
+        reg [143:0] frame;
         begin
-            frame = {8'h10, payload};
+            frame = {8'h10, payload, metadata};
             spi_cs_n = 0;
             #10;
-            for (i = 135; i >= 0; i = i - 1) begin
+            for (i = 143; i >= 0; i = i - 1) begin
                 spi_mosi = frame[i];
                 #12.5; spi_sclk = 1; // 40 MHz = 25ns period
                 #12.5; spi_sclk = 0;
@@ -68,8 +69,9 @@ module bnn_top_tb;
         // [95:64] ask_price_q17_15
         // [63:32] bid_qty_q16_16
         // [31:0] ask_qty_q16_16
+        // [7:0] metadata
         repeat (20) begin
-            send_spi_tick(128'h00075300_00075310_00010000_00010000);
+            send_spi_tick(128'h00075300_00075310_00010000_00010000, 8'h03); // velocity=3, regime=0
         end
         
         #5000;
