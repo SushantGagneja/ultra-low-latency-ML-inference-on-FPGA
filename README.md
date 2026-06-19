@@ -232,6 +232,10 @@ To fit the model onto the SLG47910V fabric, we rely heavily on sparsity. The mod
 ![Training Convergence](media/bnn_training_loss.png)
 ![Hardware Core Confusion Matrix](media/bnn_true_confusion_matrix.png)
 
+### Known ML Limitations (Phase 7)
+*   **Synthetic Data Bias:** The current QAT pipeline trains on synthetically generated market data (random walk with mean reversion). While this successfully demonstrates that the hardware architecture can learn temporal sequences and compress them into 1,120 LUTs, the resulting model requires retraining on *real* Binance L2 tick data to generate actionable live-market alpha.
+*   **MoE Bias-Only Shift Constraint:** To prevent doubling the LUT consumption, Model B (Ranging) freezes the sparse routing matrix of Model A and optimizes only the biases. While this affine shift allows the network to adapt its activation thresholds to calmer markets, it intrinsically assumes that Momentum and Ranging regimes share the same fundamental feature dependencies. If a regime requires entirely different feature crossings, this architecture will under-express.
+
 ---
 
 ## Physical Implementation Results
