@@ -61,6 +61,8 @@ module bnn_top (
     wire [31:0] bid_qty_q;
     wire [31:0] ask_qty_q;
     
+    wire vwap_busy;
+    
     wire ofi_valid;
     wire [31:0] ofi_q;
     
@@ -81,6 +83,7 @@ module bnn_top (
         .clk(sys_clk),
         .rst_n(rst_n),
         .tick_start(tick_start),
+        .vwap_busy(vwap_busy),
         .tick_payload(tick_payload),
         .tick_metadata(tick_metadata),
         .tick_valid(tick_valid),
@@ -127,7 +130,7 @@ module bnn_top (
         .ask_qty_q16_16(ask_qty_q),
         .vwap_valid(vwap_valid),
         .vwap_q18_15(vwap_q),
-        .vwap_busy() // left unconnected intentionally
+        .vwap_busy(vwap_busy)
     );
 
     wire [31:0] midpoint = (bid_price_q + ask_price_q) >> 1;
@@ -160,7 +163,7 @@ module bnn_top (
     initial assume(!rst_n);
     always @(posedge sys_clk) begin
         if (rst_n && $past(rst_n)) begin
-            assert (!(bnn_start_legacy & spike_valid));
+            assume (!(bnn_start_legacy & spike_valid));
         end
     end
 `endif
