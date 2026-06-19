@@ -7,13 +7,18 @@ GTKWAVE = gtkwave
 IVERILOG_FLAGS = -Wall -g2012 -I rtl -I rtl/testbench
 
 RTL_SRCS = \
-	rtl/bram_weights.v \
-	rtl/xnor_popcount.v \
-	rtl/bnn_core.v \
+	rtl/microstructure/hw_quantizer.v \
+	rtl/microstructure/lee_ready.v \
+	rtl/microstructure/ofi_engine.v \
+	rtl/microstructure/vwap_engine.v \
+	rtl/microstructure/tick_parser.v \
+	rtl/microstructure/sequential_multiplier.v \
+	rtl/microstructure/restoring_divider.v \
+	rtl/bnn_core_unrolled.v \
 	rtl/spi_slave.v \
 	rtl/bnn_top.v
 
-TB_SRC = rtl/testbench/bnn_core_tb.v
+TB_SRC = rtl/testbench/bnn_top_tb.v
 
 SIM_DIR = sim
 SIM_BIN = $(SIM_DIR)/bnn_core.vvp
