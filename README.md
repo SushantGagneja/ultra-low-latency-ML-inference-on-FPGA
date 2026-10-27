@@ -317,4 +317,4 @@ yosys synth.ys
 ```
 
 ## License
-MIT License.
+MIT License. See license file for details.
